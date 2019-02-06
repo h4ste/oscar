@@ -1,3 +1,24 @@
+# Multi-GPU Ready BERT
+
+__Install__
+Please first [install Horovod](https://github.com/uber/horovod#install)
+
+__Run__
+See the commands in each section to run BERT with Multi-GPUs:
+
+* [Sentence (and sentence-pair) classification tasks](#sentencepair)
+
+* [SQuAD 1.1](#squad1.1)
+
+* [SQuAD 2.0](#squad2.0)
+
+* [Pre-training](#pretraining)
+
+__Blog__
+
+This blog walks you through the changes we made to the original implementation.
+
+
 # BERT
 
 **\*\*\*\*\* New February 7th, 2019: TfHub Module \*\*\*\*\***
@@ -300,7 +321,7 @@ Storage folder `gs://bert_models/2018_10_18`. For example:
 export BERT_BASE_DIR=gs://bert_models/2018_10_18/uncased_L-12_H-768_A-12
 ```
 
-### Sentence (and sentence-pair) classification tasks
+### <a name="sentencepair"></a>Sentence (and sentence-pair) classification tasks
 
 Before running this example you must download the
 [GLUE data](https://gluebenchmark.com/tasks) by running
@@ -341,6 +362,28 @@ You should see output like this:
   loss = 0.505248
 ```
 
+Run the same task with 4 GPUs:
+```
+mpirun -np 4 \
+    -H localhost:4 \
+    -bind-to none -map-by slot \
+    -x NCCL_DEBUG=INFO -x LD_LIBRARY_PATH -x PATH \
+    -mca pml ob1 -mca btl ^openib \
+    python run_classifier_hvd.py \
+    --task_name=MRPC \
+    --do_train=true \
+    --do_eval=true \
+    --data_dir=$GLUE_DIR/MRPC \
+    --vocab_file=$BERT_BASE_DIR/vocab.txt \
+    --bert_config_file=$BERT_BASE_DIR/bert_config.json \
+    --init_checkpoint=$BERT_BASE_DIR/bert_model.ckpt \
+    --max_seq_length=128 \
+    --train_batch_size=32 \
+    --learning_rate=2e-5 \
+    --num_train_epochs=4.0 \
+    --output_dir=/tmp/mrpc_output/
+```
+
 This means that the Dev set accuracy was 84.55%. Small sets like MRPC have a
 high variance in the Dev set accuracy, even when starting from the same
 pre-training checkpoint. If you re-run multiple times (making sure to point to
@@ -352,6 +395,7 @@ use BERT for any single-sentence or sentence-pair classification task.
 
 Note: You might see a message `Running train on CPU`. This really just means
 that it's running on something other than a Cloud TPU, which includes a GPU.
+
 
 #### Prediction from classifier
 
@@ -377,7 +421,7 @@ python run_classifier.py \
   --output_dir=/tmp/mrpc_output/
 ```
 
-### SQuAD 1.1
+### <a name="squad1.1"></a>SQuAD 1.1
 
 The Stanford Question Answering Dataset (SQuAD) is a popular question answering
 benchmark dataset. BERT (at the time of the release) obtains state-of-the-art
@@ -417,6 +461,29 @@ python run_squad.py \
   --max_seq_length=384 \
   --doc_stride=128 \
   --output_dir=/tmp/squad_base/
+```
+
+Run the same task with 4 GPUs:
+```
+mpirun -np 4 \
+    -H localhost:4 \
+    -bind-to none -map-by slot \
+    -x NCCL_DEBUG=INFO -x LD_LIBRARY_PATH -x PATH \
+    -mca pml ob1 -mca btl ^openib \
+    python run_squad_hvd.py \
+    --vocab_file=$BERT_BASE_DIR/vocab.txt \
+    --bert_config_file=$BERT_BASE_DIR/bert_config.json \
+    --init_checkpoint=$BERT_BASE_DIR/bert_model.ckpt \
+    --do_train=True \
+    --train_file=$SQUAD_DIR/train-v1.1.json \
+    --do_predict=True \
+    --predict_file=$SQUAD_DIR/dev-v1.1.json \
+    --train_batch_size=12 \
+    --learning_rate=3e-5 \
+    --num_train_epochs=2.0 \
+    --max_seq_length=256 \
+    --doc_stride=128 \
+    --output_dir=/tmp/squad_base/
 ```
 
 The dev set predictions will be saved into a file called `predictions.json` in
@@ -470,7 +537,7 @@ If you fine-tune for one epoch on
 be even better, but you will need to convert TriviaQA into the SQuAD json
 format.
 
-### SQuAD 2.0
+### <a name="squad2.0"></a>SQuAD 2.0
 
 This model is also implemented and documented in `run_squad.py`.
 
@@ -505,6 +572,30 @@ python run_squad.py \
   --version_2_with_negative=True
 ```
 
+Run the same task with 4 GPUs:
+```
+mpirun -np 4 \
+    -H localhost:4 \
+    -bind-to none -map-by slot \
+    -x NCCL_DEBUG=INFO -x LD_LIBRARY_PATH -x PATH \
+    -mca pml ob1 -mca btl ^openib \
+    python run_squad_hvd.py \
+    --vocab_file=$BERT_BASE_DIR/vocab.txt \
+    --bert_config_file=$BERT_BASE_DIR/bert_config.json \
+    --init_checkpoint=$BERT_BASE_DIR/bert_model.ckpt \
+    --do_train=True \
+    --train_file=$SQUAD_DIR/train-v2.0.json \
+    --do_predict=True \
+    --predict_file=$SQUAD_DIR/dev-v2.0.json \
+    --train_batch_size=24 \
+    --learning_rate=3e-5 \
+    --num_train_epochs=2.0 \
+    --max_seq_length=256 \
+    --doc_stride=128 \
+    --output_dir=gs://some_bucket/squad_large/ \
+    --version_2_with_negative=True
+```
+
 We assume you have copied everything from the output directory to a local
 directory called ./squad/. The initial dev set predictions will be at
 ./squad/predictions.json and the differences between the score of no answer ("")
@@ -533,7 +624,7 @@ python run_squad.py \
   --train_batch_size=24 \
   --learning_rate=3e-5 \
   --num_train_epochs=2.0 \
-  --max_seq_length=384 \
+  --max_seq_length=256 \
   --doc_stride=128 \
   --output_dir=gs://some_bucket/squad_large/ \
   --use_tpu=True \
@@ -752,7 +843,7 @@ off contractions like `do n't`, this will cause a mismatch. If it is possible to
 do so, you should pre-process your data to convert these back to raw-looking
 text, but if it's not possible, this mismatch is likely not a big deal.
 
-## Pre-training with BERT
+## <a name="pretraining"></a>Pre-training with BERT
 
 We are releasing code to do "masked LM" and "next sentence prediction" on an
 arbitrary text corpus. Note that this is *not* the exact code that was used for
@@ -830,6 +921,28 @@ This will produce an output like this:
   masked_lm_loss = 0.0979328
   next_sentence_accuracy = 1.0
   next_sentence_loss = 3.45724e-05
+```
+
+Run the same task with 4 GPUs:
+```
+mpirun -np 4 \
+    -H localhost:4 \
+    -bind-to none -map-by slot \
+    -x NCCL_DEBUG=INFO -x LD_LIBRARY_PATH -x PATH \
+    -mca pml ob1 -mca btl ^openib \
+    python run_pretraining_hvd.py \
+    --input_file=/tmp/tf_examples.tfrecord \
+    --output_dir=/tmp/pretraining_output \
+    --do_train=True \
+    --do_eval=True \
+    --bert_config_file=$BERT_BASE_DIR/bert_config.json \
+    --init_checkpoint=$BERT_BASE_DIR/bert_model.ckpt \
+    --train_batch_size=32 \
+    --max_seq_length=128 \
+    --max_predictions_per_seq=20 \
+    --num_train_steps=20 \
+    --num_warmup_steps=10 \
+    --learning_rate=2e-5
 ```
 
 Note that since our `sample_text.txt` file is very small, this example training

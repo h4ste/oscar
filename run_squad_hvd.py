@@ -1291,7 +1291,7 @@ def main(_):
                       FLAGS.do_lower_case, output_prediction_file,
                       output_nbest_file, output_null_log_odds_file)
 
-  print("Total Training Time: " + str(end_train - start_train) + " seconds.")
+  # print("Total Training Time: " + str(end_train - start_train) + " seconds.")
 
 
 if __name__ == "__main__":
