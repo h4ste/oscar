@@ -596,7 +596,7 @@ mpirun -np 4 \
     --num_train_epochs=2.0 \
     --max_seq_length=256 \
     --doc_stride=128 \
-    --output_dir=gs://some_bucket/squad_large/ \
+    --output_dir=/tmp/squad2.0/ \
     --version_2_with_negative=True
 ```
 
