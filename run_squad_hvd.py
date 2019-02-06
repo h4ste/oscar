@@ -24,7 +24,7 @@ import math
 import os
 import random
 import modeling
-import optimization
+import optimization_hvd
 import tokenization
 import six
 import tensorflow as tf
@@ -661,7 +661,7 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
 
       total_loss = (start_loss + end_loss) / 2.0
 
-      train_op = optimization.create_optimizer(
+      train_op = optimization_hvd.create_optimizer(
           total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
 
       output_spec = tf.contrib.tpu.TPUEstimatorSpec(
@@ -1127,6 +1127,7 @@ def validate_flags_or_throw(bert_config):
 
 def main(_):
   hvd.init()
+  FLAGS.output_dir = FLAGS.output_dir if hvd.rank() == 0 else os.path.join(FLAGS.output_dir, str(hvd.rank()))
 
   tf.logging.set_verbosity(tf.logging.INFO)
 
@@ -1134,9 +1135,7 @@ def main(_):
 
   validate_flags_or_throw(bert_config)
 
-  ckpt_dir = FLAGS.output_dir if hvd.rank() == 0 else FLAGS.output_dir + str(hvd.rank())
-
-  tf.gfile.MakeDirs(ckpt_dir)
+  tf.gfile.MakeDirs(FLAGS.output_dir)
 
   tokenizer = tokenization.FullTokenizer(
       vocab_file=FLAGS.vocab_file, do_lower_case=FLAGS.do_lower_case)
@@ -1151,17 +1150,16 @@ def main(_):
   config = tf.ConfigProto()
   config.gpu_options.visible_device_list = str(hvd.local_rank())
 
-  
-
   run_config = tf.contrib.tpu.RunConfig(
       cluster=tpu_cluster_resolver,
       master=FLAGS.master,
-      model_dir=ckpt_dir,
+      model_dir=FLAGS.output_dir,
       save_checkpoints_steps=FLAGS.save_checkpoints_steps,
       tpu_config=tf.contrib.tpu.TPUConfig(
           iterations_per_loop=FLAGS.iterations_per_loop,
           num_shards=FLAGS.num_tpu_cores,
           per_host_input_for_training=is_per_host),
+      log_step_count_steps=25,
       session_config=config)
 
   train_examples = None
@@ -1203,7 +1201,7 @@ def main(_):
     # We write to a temporary file to avoid storing very large constant tensors
     # in memory.
     train_writer = FeatureWriter(
-        filename=os.path.join(ckpt_dir, "train.tf_record"),
+        filename=os.path.join(FLAGS.output_dir, "train.tf_record"),
         is_training=True)
     convert_examples_to_features(
         examples=train_examples,
@@ -1237,7 +1235,7 @@ def main(_):
         input_file=FLAGS.predict_file, is_training=False)
 
     eval_writer = FeatureWriter(
-        filename=os.path.join(ckpt_dir, "eval.tf_record"),
+        filename=os.path.join(FLAGS.output_dir, "eval.tf_record"),
         is_training=False)
     eval_features = []
 
@@ -1284,14 +1282,16 @@ def main(_):
               start_logits=start_logits,
               end_logits=end_logits))
 
-    output_prediction_file = os.path.join(ckpt_dir, "predictions.json")
-    output_nbest_file = os.path.join(ckpt_dir, "nbest_predictions.json")
-    output_null_log_odds_file = os.path.join(ckpt_dir, "null_odds.json")
+    output_prediction_file = os.path.join(FLAGS.output_dir, "predictions.json")
+    output_nbest_file = os.path.join(FLAGS.output_dir, "nbest_predictions.json")
+    output_null_log_odds_file = os.path.join(FLAGS.output_dir, "null_odds.json")
 
     write_predictions(eval_examples, eval_features, all_results,
                       FLAGS.n_best_size, FLAGS.max_answer_length,
                       FLAGS.do_lower_case, output_prediction_file,
                       output_nbest_file, output_null_log_odds_file)
+
+  print("Total Training Time: " + str(end_train - start_train) + " seconds.")
 
 
 if __name__ == "__main__":
