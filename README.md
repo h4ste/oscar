@@ -1,5 +1,11 @@
 # Multi-GPU Ready BERT
 
+This is a folk of the original (Google's) BERT implementation. 
+
+* Add Multi-GPU support with Horovod
+
+This [blog](https://lambdalabs.com/blog/bert-gpu/) explains all the changes we made to the original implementation.
+
 __Install__
 Please first [install Horovod](https://github.com/uber/horovod#install)
 
@@ -14,9 +20,7 @@ See the commands in each section to run BERT with Multi-GPUs:
 
 * [Pre-training](#pretraining)
 
-__Blog__
 
-This blog walks you through the changes we made to the original implementation.
 
 
 # BERT
