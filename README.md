@@ -1,6 +1,6 @@
 # Multi-GPU Ready BERT
 
-This is a folk of the original (Google's) BERT implementation. 
+This is a fork of the original (Google's) BERT implementation. 
 
 * Add Multi-GPU support with Horovod
 
