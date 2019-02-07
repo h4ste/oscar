@@ -4,7 +4,7 @@ This is a fork of the original (Google's) BERT implementation.
 
 * Add Multi-GPU support with Horovod
 
-This [blog](https://lambdalabs.com/blog/multi-gpu-enabled-bert-using-tensorflow-and-horovod/) explains all the changes we made to the original implementation.
+This [blog](https://lambdalabs.com/blog/bert-multi-gpu-implementation-using-tensorflow-and-horovod-with-code/) explains all the changes we made to the original implementation.
 
 __Install__
 Please first [install Horovod](https://github.com/uber/horovod#install)
