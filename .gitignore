@@ -190,3 +190,5 @@ reports/
 
 # Project sphinx files
 docs/sphinx/doctrees
+conf/
+models/
