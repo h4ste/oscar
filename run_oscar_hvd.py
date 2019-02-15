@@ -518,37 +518,35 @@ def input_fn_builder(input_files,
             # out-of-range exceptions.
             d = d.repeat()
 
-        def peek(fn):
-            def helper(x):
-                fn(x)
-                return x
-
-            return helper
-
         def add_entities_and_decode(record):
             example = _decode_record(record, name_to_features)
 
             def find_entities(input_ids):
-                _entities = oscar.find_entities(input_ids, entity_trie.trie)
-                starts, ends, _ids = zip(*_entities)
-
-                tf.logging.log_every_n(tf.logging.INFO, 'Sequence: %s', input_ids.shape[0] * 100,
-                                       [t for t in entity_trie.tokenizer.convert_ids_to_tokens(input_ids) if t != '[PAD]'])
-                tf.logging.log_every_n(tf.logging.INFO, 'Entities: %s', input_ids.shape[0] * 100,
-                                       '; '.join(['%s@%d-%d' % (inv_entities[entity[2]], entity[0], entity[1]) for entity in _entities]))
-
-                assert all(start >= 0 for start in starts)
-                max_len = len(input_ids)
-                assert all(end <= max_len for end in ends)
-
                 entity_ids = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
                 entity_offsets = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
                 entity_lengths = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
 
-                num_entities = np.minimum(len(_ids), max_entities_per_seq)
-                entity_ids[:num_entities] = _ids[:num_entities]
-                entity_offsets[:num_entities] = starts[:num_entities]
-                entity_lengths[:num_entities] = ends[:num_entities]
+                _entities = oscar.find_entities(input_ids, entity_trie.trie)
+                if _entities:
+                    starts, ends, _ids = zip(*_entities)
+
+                    tf.logging.log_every_n(tf.logging.INFO, 'Sequence: %s', input_ids.shape[0] * 1000,
+                                           [t for t in entity_trie.tokenizer.convert_ids_to_tokens(input_ids) if t != '[PAD]'])
+                    tf.logging.log_every_n(tf.logging.INFO, 'Entities: %s', input_ids.shape[0] * 1000,
+                                           '; '.join(['%s@%d-%d' % (inv_entities[entity[2]], entity[0], entity[1]) for entity in _entities]))
+
+                    assert all(start >= 0 for start in starts)
+                    max_len = len(input_ids)
+                    assert all(end <= max_len for end in ends)
+
+                    entity_ids = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
+                    entity_offsets = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
+                    entity_lengths = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
+
+                    num_entities = np.minimum(len(_ids), max_entities_per_seq)
+                    entity_ids[:num_entities] = _ids[:num_entities]
+                    entity_offsets[:num_entities] = starts[:num_entities]
+                    entity_lengths[:num_entities] = ends[:num_entities]
 
                 return entity_ids, entity_offsets, entity_lengths - entity_offsets
 
