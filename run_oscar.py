@@ -127,7 +127,8 @@ flags.DEFINE_integer(
 
 def model_fn_builder(oscar_config, entity_embeddings, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
-                     use_one_hot_embeddings):
+                     use_one_hot_embeddings,
+                     optimizer_fn=optimization.create_optimizer):
     """Returns `model_fn` closure for TPUEstimator."""
 
     # noinspection PyUnusedLocal
@@ -217,7 +218,7 @@ def model_fn_builder(oscar_config, entity_embeddings, init_checkpoint, learning_
 
         output_spec = None
         if mode == tf.estimator.ModeKeys.TRAIN:
-            train_op = optimization.create_optimizer(
+            train_op = optimizer_fn(
                 total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
 
             output_spec = tf.contrib.tpu.TPUEstimatorSpec(
@@ -304,18 +305,27 @@ def get_oscar_loss(oscar_config,  #type: oscar.OscarConfig
         entity_width = entity_embedding_shape[2]
 
         composed_entities = slice_indexes(token_embeddings, entity_offsets, entity_lengths)
+
+        flat_lengths = tf.reshape(entity_lengths, [-1, 1])
+
         tf.logging.info('Entity Slices: %s', composed_entities)
         # Composed entities are  [ (batch * max_entities) x token_embedding_size ]
-        with tf.variable_scope('transform'):
-            composed_entities = tf.layers.dense(composed_entities, units=entity_width,
-                                              kernel_initializer=modeling.create_initializer(
-                                                  oscar_config.initializer_range))
-            composed_entities = modeling.layer_norm(composed_entities)
+        with tf.variable_scope('project'):
+            proj_weights = tf.get_variable(
+                "weights", [entity_width, oscar_config.hidden_size],
+                initializer=tf.truncated_normal_initializer(stddev=0.02))
+
+            proj_bias = tf.get_variable(
+                "bias", [entity_width], initializer=tf.zeros_initializer())
+
+            composed_entities = tf.matmul(composed_entities, proj_weights, transpose_b=True)
+            composed_entities = tf.nn.bias_add(composed_entities, proj_bias * flat_lengths)
 
         composed_entities = tf.reshape(composed_entities, [batch_size, max_entities, entity_width])
         difference = tf.norm(embedded_entities - composed_entities, ord=oscar_config.norm_ord)
         mask = tf.to_float(tf.minimum(entity_lengths, 1))
-        example_loss = tf.reduce_sum(difference * mask, axis=-1)
+        # 1/2 * average l2 difference
+        example_loss = tf.reduce_sum(difference * mask, axis=-1) / (2 * tf.reduce_sum(mask, axis=-1))
         loss = tf.reduce_mean(example_loss, axis=-1)
     return loss, example_loss
 
