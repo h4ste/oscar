@@ -23,7 +23,6 @@ import modeling
 import optimization
 import oscar
 import tokenization
-import entity_searcher
 
 import numpy as np
 
@@ -127,7 +126,8 @@ flags.DEFINE_integer(
 
 def model_fn_builder(oscar_config, entity_embeddings, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
-                     use_one_hot_embeddings):
+                     use_one_hot_embeddings,
+                     optimizer_fn=optimization.create_optimizer):
     """Returns `model_fn` closure for TPUEstimator."""
 
     # noinspection PyUnusedLocal
@@ -147,7 +147,7 @@ def model_fn_builder(oscar_config, entity_embeddings, init_checkpoint, learning_
         masked_lm_weights = features["masked_lm_weights"]
         next_sentence_labels = features["next_sentence_labels"]
 
-        entity_ids = features["entity_ids"]
+        entity_embeddings = features["entity_embeddings"]
         entity_positions = features["entity_positions"]
         entity_lengths = features["entity_lengths"]
 
@@ -173,7 +173,6 @@ def model_fn_builder(oscar_config, entity_embeddings, init_checkpoint, learning_
         (entity_loss, entity_example_loss) = get_oscar_loss(oscar_config,
                                                             model.get_all_encoder_layers()[oscar_config.encoder_layer],
                                                             entity_embeddings,
-                                                            entity_ids,
                                                             entity_positions,
                                                             entity_lengths)
 
@@ -217,7 +216,7 @@ def model_fn_builder(oscar_config, entity_embeddings, init_checkpoint, learning_
 
         output_spec = None
         if mode == tf.estimator.ModeKeys.TRAIN:
-            train_op = optimization.create_optimizer(
+            train_op = optimizer_fn(
                 total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
 
             output_spec = tf.contrib.tpu.TPUEstimatorSpec(
@@ -289,33 +288,41 @@ def model_fn_builder(oscar_config, entity_embeddings, init_checkpoint, learning_
 
 
 def get_oscar_loss(oscar_config,  #type: oscar.OscarConfig
-                   token_embeddings, entity_embeddings, entity_ids, entity_offsets, entity_lengths):
+                   token_embeddings, embedded_entities, entity_offsets, entity_lengths):
     """
 
     :type oscar_config: oscar.OscarConfig
     """
     with tf.variable_scope('oscar'):
-        entity_embedding_table = tf.constant(entity_embeddings, name="entity_embedding_table", dtype=tf.float32)
-        embedded_entities = tf.nn.embedding_lookup(entity_embedding_table, entity_ids, name='entity_embeddings')
-
+        # entity_embedding_table = tf.constant(entity_embeddings, name="entity_embedding_table", dtype=tf.float32)
+        # embedded_entities = tf.nn.embedding_lookup(entity_embedding_table, entity_ids, name='entity_embeddings')
         entity_embedding_shape = modeling.get_shape_list(embedded_entities)
         batch_size = entity_embedding_shape[0]
         max_entities = entity_embedding_shape[1]
         entity_width = entity_embedding_shape[2]
 
         composed_entities = slice_indexes(token_embeddings, entity_offsets, entity_lengths)
+
+        flat_lengths = tf.to_float(tf.reshape(entity_lengths, [-1, 1]))
+
         tf.logging.info('Entity Slices: %s', composed_entities)
         # Composed entities are  [ (batch * max_entities) x token_embedding_size ]
-        with tf.variable_scope('transform'):
-            composed_entities = tf.layers.dense(composed_entities, units=entity_width,
-                                              kernel_initializer=modeling.create_initializer(
-                                                  oscar_config.initializer_range))
-            composed_entities = modeling.layer_norm(composed_entities)
+        with tf.variable_scope('project'):
+            proj_weights = tf.get_variable(
+                "weights", [entity_width, oscar_config.hidden_size],
+                initializer=tf.truncated_normal_initializer(stddev=0.02))
+
+            proj_bias = tf.get_variable(
+                "bias", [1, entity_width], initializer=tf.zeros_initializer())
+
+            composed_entities = tf.matmul(composed_entities, proj_weights, transpose_b=True)
+            composed_entities = composed_entities + flat_lengths * proj_bias
 
         composed_entities = tf.reshape(composed_entities, [batch_size, max_entities, entity_width])
         difference = tf.norm(embedded_entities - composed_entities, ord=oscar_config.norm_ord)
         mask = tf.to_float(tf.minimum(entity_lengths, 1))
-        example_loss = tf.reduce_sum(difference * mask, axis=-1)
+        # 1/2 * average l2 difference
+        example_loss = tf.reduce_sum(difference * mask, axis=-1) / (2 * tf.reduce_sum(mask, axis=-1))
         loss = tf.reduce_mean(example_loss, axis=-1)
     return loss, example_loss
 
@@ -460,6 +467,7 @@ def input_fn_builder(input_files,
                      max_entities_per_seq,
                      entity_trie,
                      entities,
+                     embeddings,
                      is_training,
                      num_cpu_threads=4):
     """Creates an `input_fn` closure to be passed to TPUEstimator."""
@@ -517,12 +525,7 @@ def input_fn_builder(input_files,
             # out-of-range exceptions.
             d = d.repeat()
 
-        def peek(fn):
-            def helper(x):
-                fn(x)
-                return x
-
-            return helper
+        embedding_width = embeddings.shape[1]
 
         def add_entities_and_decode(record):
             example = _decode_record(record, name_to_features)
@@ -540,24 +543,25 @@ def input_fn_builder(input_files,
                 max_len = len(input_ids)
                 assert all(end <= max_len for end in ends)
 
-                entity_ids = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
+                entity_embeddings = np.zeros(shape=[max_entities_per_seq, embedding_width], dtype=np.float32)
                 entity_offsets = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
                 entity_lengths = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
 
                 num_entities = np.minimum(len(_ids), max_entities_per_seq)
-                entity_ids[:num_entities] = _ids[:num_entities]
+                entity_embeddings[:num_entities] = [embeddings[id] for id in _ids[:num_entities]]
                 entity_offsets[:num_entities] = starts[:num_entities]
                 entity_lengths[:num_entities] = ends[:num_entities]
 
-                return entity_ids, entity_offsets, entity_lengths - entity_offsets
+                return entity_embeddings, entity_offsets, entity_lengths - entity_offsets
 
-            ids, offsets, lengths = tf.py_func(find_entities, [example['input_ids']], [tf.int32] * 3)
+            _embeddings, offsets, lengths = tf.py_func(find_entities, [example['input_ids']],
+                                                       [tf.float32, tf.int32, tf.int32])
 
-            ids.set_shape([max_entities_per_seq])
+            _embeddings.set_shape([max_entities_per_seq, embedding_width])
             offsets.set_shape([max_entities_per_seq])
             lengths.set_shape([max_entities_per_seq])
 
-            example['entity_ids'] = ids
+            example['entity_embeddings'] = _embeddings
             example['entity_positions'] = offsets
             example['entity_lengths'] = lengths
 
@@ -592,38 +596,6 @@ def _decode_record(record, name_to_features):
         example[name] = t
 
     return example
-
-
-class EntityReporter(tf.train.SessionRunHook):
-
-    def __init__(self, vocab_file, entity_embedding_path):
-        self.entities, self.embeddings = oscar.load_numberbatch(entity_embedding_path)
-        self.inv_entities = {v: k for k, v in self.entities.items()}
-        self.entity_trie = oscar.SubwordTrie.from_vocab_file(vocab_file, True)
-        for i, entity in enumerate(self.entities):
-            path = self.entity_trie.put_string(entity, i)
-            tf.logging.log_every_n(tf.logging.INFO, 'Adding %s as %s:%d', len(self.entities) / 100,
-                                   entity, path, i)
-
-    def before_run(self, run_context):
-        return tf.train.SessionRunArgs(['bert/embeddings/word_embeddings', 'IteratorGetNext:0'])
-
-    def after_run(self,
-                  run_context,  # pylint: disable=unused-argument
-                  run_values):
-        word_embeddings, input_ids = run_values.results
-
-        for example_ids in input_ids:
-            entities = [(t[0], t[1], [self.inv_entities[e] for e in t[2]]) for t in
-                        oscar.find_entities(example_ids, self.entity_trie.trie)]
-            tokens = self.entity_trie.tokenizer.convert_ids_to_tokens(example_ids)
-            tf.logging.log_every_n(tf.logging.INFO, 'Sentence: %s',
-                                   len(input_ids),
-                                   ' '.join([tokenization.printable_text(x) for x in tokens if x != '[PAD]'][1:]))
-            tf.logging.log_every_n(tf.logging.INFO, 'Entities (%d): {%s}',
-                                   len(input_ids),
-                                   len(entities),
-                                   '; '.join(['%s@%d-%d' % (t[2], t[0], t[1]) for t in entities]))
 
 
 def main(_):
@@ -697,7 +669,8 @@ def main(_):
             is_training=True,
             max_entities_per_seq=FLAGS.max_entities_per_seq,
             entity_trie=entity_trie,
-            entities=entities
+            entities=entities,
+            embeddings=embeddings
         )
         estimator.train(input_fn=train_input_fn, max_steps=FLAGS.num_train_steps)
         # hooks=[hook])
@@ -713,7 +686,8 @@ def main(_):
             is_training=False,
             max_entities_per_seq=FLAGS.max_entities_per_seq,
             entity_trie=entity_trie,
-            entities=entities
+            entities=entities,
+            embeddings=embeddings
         )
 
         result = estimator.evaluate(
