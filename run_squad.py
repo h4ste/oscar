@@ -592,7 +592,7 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
 
 def model_fn_builder(bert_config, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
-                     use_one_hot_embeddings, optimizer_fn=optimization.create_optimizer):
+                     use_one_hot_embeddings, optimizer_fn):
     """Returns `model_fn` closure for TPUEstimator."""
 
     def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
@@ -1178,7 +1178,8 @@ def main(_):
         num_train_steps=num_train_steps,
         num_warmup_steps=num_warmup_steps,
         use_tpu=FLAGS.use_tpu,
-        use_one_hot_embeddings=FLAGS.use_tpu)
+        use_one_hot_embeddings=FLAGS.use_tpu,
+        optimizer_fn=optimization.create_optimizer)
 
     # If TPU is not available, this will fall back to normal Estimator on CPU
     # or GPU.

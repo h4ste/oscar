@@ -169,6 +169,8 @@ def main(_):
         tf.logging.info("  Num split examples = %d", len(eval_features))
         tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
 
+        all_results = []
+
         predict_input_fn = input_fn_builder(
             input_file=eval_writer.filename,
             seq_length=FLAGS.max_seq_length,
@@ -205,4 +207,4 @@ if __name__ == "__main__":
     flags.mark_flag_as_required("vocab_file")
     flags.mark_flag_as_required("bert_config_file")
     flags.mark_flag_as_required("output_dir")
-    tf.app.run()
+    tf.app.run(main)
