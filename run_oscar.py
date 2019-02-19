@@ -532,25 +532,27 @@ def input_fn_builder(input_files,
 
             def find_entities(input_ids):
                 _entities = oscar.find_entities(input_ids, entity_trie.trie)
-                starts, ends, _ids = zip(*_entities)
 
-                tf.logging.log_every_n(tf.logging.INFO, 'Sequence: %s', input_ids.shape[0] * 100,
-                                       [t for t in entity_trie.tokenizer.convert_ids_to_tokens(input_ids) if t != '[PAD]'])
-                tf.logging.log_every_n(tf.logging.INFO, 'Entities: %s', input_ids.shape[0] * 100,
-                                       '; '.join(['%s@%d-%d' % (inv_entities[entity[2]], entity[0], entity[1]) for entity in _entities]))
+                if _entities:
+                    starts, ends, _ids = zip(*_entities)
 
-                assert all(start >= 0 for start in starts)
-                max_len = len(input_ids)
-                assert all(end <= max_len for end in ends)
+                    tf.logging.log_every_n(tf.logging.INFO, 'Sequence: %s', input_ids.shape[0] * 100,
+                                           [t for t in entity_trie.tokenizer.convert_ids_to_tokens(input_ids) if t != '[PAD]'])
+                    tf.logging.log_every_n(tf.logging.INFO, 'Entities: %s', input_ids.shape[0] * 100,
+                                           '; '.join(['%s@%d-%d' % (inv_entities[entity[2]], entity[0], entity[1]) for entity in _entities]))
 
-                entity_embeddings = np.zeros(shape=[max_entities_per_seq, embedding_width], dtype=np.float32)
-                entity_offsets = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
-                entity_lengths = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
+                    assert all(start >= 0 for start in starts)
+                    max_len = len(input_ids)
+                    assert all(end <= max_len for end in ends)
 
-                num_entities = np.minimum(len(_ids), max_entities_per_seq)
-                entity_embeddings[:num_entities] = [embeddings[id] for id in _ids[:num_entities]]
-                entity_offsets[:num_entities] = starts[:num_entities]
-                entity_lengths[:num_entities] = ends[:num_entities]
+                    entity_embeddings = np.zeros(shape=[max_entities_per_seq, embedding_width], dtype=np.float32)
+                    entity_offsets = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
+                    entity_lengths = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
+
+                    num_entities = np.minimum(len(_ids), max_entities_per_seq)
+                    entity_embeddings[:num_entities] = [embeddings[id] for id in _ids[:num_entities]]
+                    entity_offsets[:num_entities] = starts[:num_entities]
+                    entity_lengths[:num_entities] = ends[:num_entities]
 
                 return entity_embeddings, entity_offsets, entity_lengths - entity_offsets
 
