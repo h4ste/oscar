@@ -531,6 +531,10 @@ def input_fn_builder(input_files,
             example = _decode_record(record, name_to_features)
 
             def find_entities(input_ids):
+                entity_embeddings = np.zeros(shape=[max_entities_per_seq, embedding_width], dtype=np.float32)
+                entity_offsets = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
+                entity_lengths = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
+
                 _entities = oscar.find_entities(input_ids, entity_trie.trie)
 
                 if _entities:
@@ -544,10 +548,6 @@ def input_fn_builder(input_files,
                     assert all(start >= 0 for start in starts)
                     max_len = len(input_ids)
                     assert all(end <= max_len for end in ends)
-
-                    entity_embeddings = np.zeros(shape=[max_entities_per_seq, embedding_width], dtype=np.float32)
-                    entity_offsets = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
-                    entity_lengths = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
 
                     num_entities = np.minimum(len(_ids), max_entities_per_seq)
                     entity_embeddings[:num_entities] = [embeddings[id] for id in _ids[:num_entities]]
