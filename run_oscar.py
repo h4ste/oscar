@@ -19,14 +19,13 @@ from __future__ import division
 from __future__ import print_function
 
 import os
+
+import numpy as np
+import tensorflow as tf
+
 import modeling
 import optimization
 import oscar
-import tokenization
-
-import numpy as np
-
-import tensorflow as tf
 
 flags = tf.flags
 
@@ -124,7 +123,7 @@ flags.DEFINE_integer(
     "Only used if `use_tpu` is True. Total number of TPU cores to use.")
 
 
-def model_fn_builder(oscar_config, entity_embeddings, init_checkpoint, learning_rate,
+def model_fn_builder(oscar_config, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
                      use_one_hot_embeddings,
                      optimizer_fn=optimization.create_optimizer):
@@ -287,12 +286,8 @@ def model_fn_builder(oscar_config, entity_embeddings, init_checkpoint, learning_
     return model_fn
 
 
-def get_oscar_loss(oscar_config,  #type: oscar.OscarConfig
+def get_oscar_loss(oscar_config,
                    token_embeddings, embedded_entities, entity_offsets, entity_lengths):
-    """
-
-    :type oscar_config: oscar.OscarConfig
-    """
     with tf.variable_scope('oscar'):
         # entity_embedding_table = tf.constant(entity_embeddings, name="entity_embedding_table", dtype=tf.float32)
         # embedded_entities = tf.nn.embedding_lookup(entity_embedding_table, entity_ids, name='entity_embeddings')
@@ -405,9 +400,6 @@ def slice_indexes(sequence_tensor, positions, lengths):
     seq_length = sequence_shape[1]
     width = sequence_shape[2]
 
-    positions_shape = modeling.get_shape_list(positions, expected_rank=2)
-    num_positions = positions_shape[1]
-
     tf.logging.info('Slice::sequence_tensor: %s', sequence_tensor)
     tf.logging.info('Slice::positions: %s', positions)
     tf.logging.info('Slice::lengths: %s', lengths)
@@ -427,15 +419,15 @@ def slice_indexes(sequence_tensor, positions, lengths):
 
     tf.logging.info('Slice::flat_sequence_tensor: %s', flat_sequence_tensor)
 
-    def slice(tensors):
-        slice = tf.slice(flat_sequence_tensor, tensors[0], tensors[1])
-        slice.set_shape([None, width])
-        tf.logging.info('Slice::slice: %s', slice)
-        aggregate_slice = tf.reduce_sum(slice, axis=0)
+    def slice_fn(tensors):
+        _slice = tf.slice(flat_sequence_tensor, tensors[0], tensors[1])
+        _slice.set_shape([None, width])
+        tf.logging.info('Slice::slice: %s', _slice)
+        aggregate_slice = tf.reduce_sum(_slice, axis=0)
         tf.logging.info('Slice::aggregate_slice: %s', aggregate_slice)
         return aggregate_slice
 
-    output_tensors = tf.map_fn(slice, [flat_2d_positions, flat_2d_lengths], dtype=tf.float32, infer_shape=True)
+    output_tensors = tf.map_fn(slice_fn, [flat_2d_positions, flat_2d_lengths], dtype=tf.float32, infer_shape=True)
     tf.logging.info('Slice::output_tensors: %s', output_tensors)
 
     return output_tensors
@@ -543,16 +535,19 @@ def input_fn_builder(input_files,
                     starts, ends, _ids = zip(*_entities)
 
                     tf.logging.log_every_n(tf.logging.INFO, 'Sequence: %s', input_ids.shape[0] * 100,
-                                           [t for t in entity_trie.tokenizer.convert_ids_to_tokens(input_ids) if t != '[PAD]'])
+                                           [t for t in entity_trie.tokenizer.convert_ids_to_tokens(input_ids) if
+                                            t != '[PAD]'])
                     tf.logging.log_every_n(tf.logging.INFO, 'Entities: %s', input_ids.shape[0] * 100,
-                                           '; '.join(['%s@%d-%d' % (inv_entities[entity[2]], entity[0], entity[1]) for entity in _entities]))
+                                           '; '.join(
+                                               ['%s@%d-%d' % (inv_entities[entity[2]], entity[0], entity[1]) for entity
+                                                in _entities]))
 
                     assert all(start >= 0 for start in starts)
                     max_len = len(input_ids)
                     assert all(end <= max_len for end in ends)
 
                     num_entities = np.minimum(len(_ids), max_entities_per_seq)
-                    entity_embeddings[:num_entities] = [embeddings[id] for id in _ids[:num_entities]]
+                    entity_embeddings[:num_entities] = [embeddings[_id] for _id in _ids[:num_entities]]
                     entity_offsets[:num_entities] = starts[:num_entities]
                     entity_lengths[:num_entities] = ends[:num_entities]
 
@@ -645,7 +640,6 @@ def main(_):
 
     model_fn = model_fn_builder(
         oscar_config=oscar_config,
-        entity_embeddings=embeddings,
         init_checkpoint=FLAGS.init_checkpoint,
         learning_rate=FLAGS.learning_rate,
         num_train_steps=FLAGS.num_train_steps,

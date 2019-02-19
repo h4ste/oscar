@@ -32,6 +32,7 @@ flags = tf.flags
 
 FLAGS = flags.FLAGS
 
+
 def main(_):
     hvd.init()
     FLAGS.output_dir = FLAGS.output_dir if hvd.rank() == 0 else os.path.join(FLAGS.output_dir, str(hvd.rank()))
@@ -86,7 +87,6 @@ def main(_):
 
     model_fn = model_fn_builder(
         oscar_config=oscar_config,
-        entity_embeddings=embeddings,
         init_checkpoint=FLAGS.init_checkpoint,
         learning_rate=FLAGS.learning_rate,
         num_train_steps=FLAGS.num_train_steps,
