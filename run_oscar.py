@@ -321,8 +321,10 @@ def get_oscar_loss(oscar_config,  #type: oscar.OscarConfig
         composed_entities = tf.reshape(composed_entities, [batch_size, max_entities, entity_width])
         difference = tf.norm(embedded_entities - composed_entities, ord=oscar_config.norm_ord)
         mask = tf.to_float(tf.minimum(entity_lengths, 1))
+        # If we have no entities, we set num_entities = 1 to avoid division by zero
+        num_entities = tf.maximum(tf.reduce_sum(mask, axis=-1), 1)
         # 1/2 * average l2 difference
-        example_loss = tf.reduce_sum(difference * mask, axis=-1) / (2 * tf.reduce_sum(mask, axis=-1))
+        example_loss = tf.reduce_sum(difference * mask, axis=-1) / (2 * num_entities)
         loss = tf.reduce_mean(example_loss, axis=-1)
     return loss, example_loss
 
