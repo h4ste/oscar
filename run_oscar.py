@@ -306,7 +306,7 @@ def get_oscar_loss(oscar_config,  #type: oscar.OscarConfig
 
         composed_entities = slice_indexes(token_embeddings, entity_offsets, entity_lengths)
 
-        flat_lengths = tf.reshape(entity_lengths, [-1, 1])
+        flat_lengths = tf.to_float(tf.reshape(entity_lengths, [-1, 1]))
 
         tf.logging.info('Entity Slices: %s', composed_entities)
         # Composed entities are  [ (batch * max_entities) x token_embedding_size ]
@@ -316,10 +316,10 @@ def get_oscar_loss(oscar_config,  #type: oscar.OscarConfig
                 initializer=tf.truncated_normal_initializer(stddev=0.02))
 
             proj_bias = tf.get_variable(
-                "bias", [entity_width], initializer=tf.zeros_initializer())
+                "bias", [1, entity_width], initializer=tf.zeros_initializer())
 
             composed_entities = tf.matmul(composed_entities, proj_weights, transpose_b=True)
-            composed_entities = tf.nn.bias_add(composed_entities, proj_bias * flat_lengths)
+            composed_entities = composed_entities + flat_lengths * proj_bias
 
         composed_entities = tf.reshape(composed_entities, [batch_size, max_entities, entity_width])
         difference = tf.norm(embedded_entities - composed_entities, ord=oscar_config.norm_ord)
