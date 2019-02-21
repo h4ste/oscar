@@ -24,6 +24,7 @@ import time
 import numpy as np
 import tensorflow as tf
 
+import gpu_environment
 import modeling
 import optimization
 import oscar
@@ -131,6 +132,10 @@ flags.DEFINE_bool("use_fp16", False, "Whether to use fp32 or fp16 arithmetic on 
 
 flags.DEFINE_bool("use_xla", False, "Whether to enable XLA JIT compilation.")
 
+flags.DEFINE_bool("allow_subsumed_entities", False,
+                  "Whether to allow subsumed entities (e.g., whether to allow 'dog' to be recognized if 'hot dog' is "
+                  "recognized.)")
+
 
 # report samples/sec, total loss and learning rate during training
 # noinspection PyAttributeOutsideInit
@@ -221,7 +226,8 @@ def model_fn_builder(oscar_config, init_checkpoint, learning_rate,
                                                             model.get_all_encoder_layers()[oscar_config.encoder_layer],
                                                             entity_embeddings,
                                                             entity_positions,
-                                                            entity_lengths)
+                                                            entity_lengths,
+                                                            compute_type=tf.float16 if FLAGS.use_fp16 else tf.float32)
 
         masked_lm_loss = tf.identity(masked_lm_loss, "mlm_loss")
         next_sentence_loss = tf.identity(next_sentence_loss, "nsp_loss")
@@ -336,8 +342,9 @@ def model_fn_builder(oscar_config, init_checkpoint, learning_rate,
 
 
 def get_oscar_loss(oscar_config,
-                   token_embeddings, embedded_entities, entity_offsets, entity_lengths):
-    with tf.variable_scope('oscar'):
+                   token_embeddings, embedded_entities, entity_offsets, entity_lengths,
+                   compute_type=tf.float32):
+    with tf.variable_scope('oscar', custom_getter=gpu_environment.get_custom_getter(compute_type)):
         # entity_embedding_table = tf.constant(entity_embeddings, name="entity_embedding_table", dtype=tf.float32)
         # embedded_entities = tf.nn.embedding_lookup(entity_embedding_table, entity_ids, name='entity_embeddings')
         entity_embedding_shape = modeling.get_shape_list(embedded_entities)
@@ -345,7 +352,7 @@ def get_oscar_loss(oscar_config,
         max_entities = entity_embedding_shape[1]
         entity_width = entity_embedding_shape[2]
 
-        composed_entities = slice_indexes(token_embeddings, entity_offsets, entity_lengths)
+        composed_entities = slice_indexes(token_embeddings, entity_offsets, entity_lengths, compute_type)
 
         flat_lengths = tf.to_float(tf.reshape(entity_lengths, [-1, 1]))
 
@@ -442,7 +449,7 @@ def get_next_sentence_output(bert_config, input_tensor, labels):
         return loss, per_example_loss, log_probs
 
 
-def slice_indexes(sequence_tensor, positions, lengths):
+def slice_indexes(sequence_tensor, positions, lengths, compute_type=tf.float32):
     """Gathers the vectors at the specific positions over a minibatch."""
     sequence_shape = modeling.get_shape_list(sequence_tensor, expected_rank=3)
     batch_size = sequence_shape[0]
@@ -474,7 +481,7 @@ def slice_indexes(sequence_tensor, positions, lengths):
         tf.logging.info('Slice::slice: %s', _slice)
         aggregate_slice = tf.reduce_sum(_slice, axis=0)
         tf.logging.info('Slice::aggregate_slice: %s', aggregate_slice)
-        return aggregate_slice
+        return tf.cast(aggregate_slice, tf.float32)
 
     output_tensors = tf.map_fn(slice_fn, [flat_2d_positions, flat_2d_lengths], dtype=tf.float32, infer_shape=True)
     tf.logging.info('Slice::output_tensors: %s', output_tensors)
@@ -581,7 +588,10 @@ def input_fn_builder(input_files,
                 entity_offsets = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
                 entity_lengths = np.zeros(shape=max_entities_per_seq, dtype=np.int32)
 
-                _entities = oscar.find_entities(input_ids, entity_trie.trie)
+                if FLAGS.allow_subsumed_entities:
+                    _entities = oscar.find_entities(input_ids, entity_trie.trie)
+                else:
+                    _entities = oscar.find_longest_entities(input_ids, entity_trie.trie)
 
                 if _entities:
                     starts, ends, _ids = zip(*_entities)
@@ -594,9 +604,9 @@ def input_fn_builder(input_files,
                                                ['%s@%d-%d' % (inv_entities[entity[2]], entity[0], entity[1]) for entity
                                                 in _entities]))
 
-                    assert all(start >= 0 for start in starts)
-                    max_len = len(input_ids)
-                    assert all(end <= max_len for end in ends)
+                    # assert all(start >= 0 for start in starts)
+                    # max_len = len(input_ids)
+                    # assert all(end <= max_len for end in ends)
 
                     num_entities = np.minimum(len(_ids), max_entities_per_seq)
                     entity_embeddings[:num_entities] = [embeddings[_id] for _id in _ids[:num_entities]]
@@ -695,6 +705,7 @@ def main(_):
         cluster=tpu_cluster_resolver,
         master=FLAGS.master,
         model_dir=FLAGS.output_dir,
+        session_config=config,
         save_checkpoints_steps=FLAGS.save_checkpoints_steps if not FLAGS.horovod or hvd.rank() == 0 else None,
         tpu_config=tf.contrib.tpu.TPUConfig(
             iterations_per_loop=FLAGS.iterations_per_loop,
@@ -747,7 +758,7 @@ def main(_):
             entities=entities,
             embeddings=embeddings
         )
-        estimator.train(input_fn=train_input_fn, max_steps=FLAGS.num_train_steps)
+        estimator.train(input_fn=train_input_fn, hooks=training_hooks, max_steps=FLAGS.num_train_steps)
         # hooks=[hook])
 
     if FLAGS.do_eval and (not FLAGS.horovod or hvd.rank() == 0):
