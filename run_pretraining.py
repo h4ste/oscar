@@ -525,7 +525,7 @@ def main(_):
         training_hooks.append(hvd.BroadcastGlobalVariablesHook(0))
     if FLAGS.report_loss:
         global_batch_size = FLAGS.train_batch_size if not FLAGS.horovod else FLAGS.train_batch_size * hvd.size()
-        training_hooks.append(LogSessionRunHook(global_batch_size, 1, -1 if not FLAGS.horovod else hvd.rank()))
+        training_hooks.append(_LogSessionRunHook(global_batch_size, 1, -1 if not FLAGS.horovod else hvd.rank()))
 
     # If TPU is not available, this will fall back to normal Estimator on CPU
     # or GPU.
