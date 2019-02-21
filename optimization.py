@@ -22,7 +22,7 @@ import re
 import tensorflow as tf
 
 
-def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu):
+def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu, hvd=None, use_fp16=False):
   """Creates an optimizer training op."""
   global_step = tf.train.get_or_create_global_step()
 
@@ -68,7 +68,43 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu):
     optimizer = tf.contrib.tpu.CrossShardOptimizer(optimizer)
 
   tvars = tf.trainable_variables()
-  grads = tf.gradients(loss, tvars)
+  grads = tf.gradients(loss if not use_fp16 else loss*128.0, tvars)
+
+  # average gradients with horovod and divide by loss_scale
+  if hvd is not None:
+    from horovod.tensorflow.compression import Compression
+    averaged_gradients = []
+    with tf.name_scope("Horovod_Allreduce"):
+      for grad in grads:
+        if grad is not None:
+          if isinstance(grad, tf.IndexedSlices):
+            grad = tf.convert_to_tensor(grad)
+          if hvd.size() > 1:
+            avg_grad = hvd.allreduce(tf.cast(grad, tf.float16),
+                                     device_dense='',
+                                     device_sparse='',
+                                     compression=Compression.none)
+          else:
+            avg_grad = grad
+          if use_fp16:
+            averaged_gradients.append(tf.cast(avg_grad, tf.float32)/128.0)
+          else:
+            averaged_gradients.append(tf.cast(avg_grad, tf.float32))
+        else:
+          averaged_gradients.append(None)
+    grads = averaged_gradients
+  # divide gradients by loss_scale
+  elif use_fp16:
+    fp32_grads = []
+    for grad in grads:
+      if grad is not None:
+        if isinstance(grad, tf.IndexedSlices):
+          grad = tf.convert_to_tensor(grad)
+        grad = grad/128.0
+        fp32_grads.append(grad)
+      else:
+        fp32_grads.append(None)
+    grads = fp32_grads
 
   # This is how the model was pre-trained.
   (grads, _) = tf.clip_by_global_norm(grads, clip_norm=1.0)
@@ -80,6 +116,7 @@ def create_optimizer(loss, init_lr, num_train_steps, num_warmup_steps, use_tpu):
   # However, `AdamWeightDecayOptimizer` doesn't do this. But if you use
   # a different optimizer, you should probably take this line out.
   new_global_step = global_step + 1
+  new_global_step = tf.identity(new_global_step, name='step_update')
   train_op = tf.group(train_op, [global_step.assign(new_global_step)])
   return train_op
 
@@ -98,7 +135,7 @@ class AdamWeightDecayOptimizer(tf.train.Optimizer):
     """Constructs a AdamWeightDecayOptimizer."""
     super(AdamWeightDecayOptimizer, self).__init__(False, name)
 
-    self.learning_rate = learning_rate
+    self.learning_rate = tf.identity(learning_rate, name='learning_rate')
     self.weight_decay_rate = weight_decay_rate
     self.beta_1 = beta_1
     self.beta_2 = beta_2
