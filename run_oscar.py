@@ -128,6 +128,8 @@ flags.DEFINE_bool("horovod", False, "Whether to use Horovod for multi-gpu runs")
 
 flags.DEFINE_bool("report_loss", False, "Whether to report total loss during training.")
 
+flags.DEFINE_integer("report_loss_iters", 10, "How many iterations between loss reports")
+
 flags.DEFINE_bool("use_fp16", False, "Whether to use fp32 or fp16 arithmetic on GPU.")
 
 flags.DEFINE_bool("use_xla", False, "Whether to enable XLA JIT compilation.")
@@ -733,7 +735,7 @@ def main(_):
         training_hooks.append(hvd.BroadcastGlobalVariablesHook(0))
     if FLAGS.report_loss:
         global_batch_size = FLAGS.train_batch_size if not FLAGS.horovod else FLAGS.train_batch_size * hvd.size()
-        training_hooks.append(_LogSessionRunHook(global_batch_size, 1, -1 if not FLAGS.horovod else hvd.rank()))
+        training_hooks.append(_LogSessionRunHook(global_batch_size, FLAGS.report_loss_iters, -1 if not FLAGS.horovod else hvd.rank()))
     # If TPU is not available, this will fall back to normal Estimator on CPU
     # or GPU.
     estimator = tf.contrib.tpu.TPUEstimator(
