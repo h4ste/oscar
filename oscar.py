@@ -12,7 +12,7 @@ import tensorflow as tf
 
 import tokenization
 from modeling import BertConfig, create_initializer
-from tokenization import convert_to_unicode, FullTokenizer
+from tokenization import FullTokenizer
 
 
 class OscarConfig(BertConfig):
@@ -175,27 +175,27 @@ def fixed_compositional_distance(oscar_config, subword_embeddings, entity_embedd
         # loss = tf.reduce_sum(difference)
     return loss
 
-        #ex
-        #
-        #
-        #
-        # weights = tf.get_variable(
-        #     "composition_weights",
-        #     shape=[oscar_config.embedding_size, oscar_config.entity_embbedding_size],
-        #     initializer=create_initializer(oscar_config.initializer_range))
-        # bias = tf.get_variable(
-        #     "composition_bias", shape=[oscar_config.entity_embbedding_size],
-        #     initializer=tf.zeros_initializer())
-        #
-        # for subword_ids in entity_mapping:
-        #     subword_sum = tf.reduce_sum(subword_embeddings, axis=-1)
-        #     tf.matmul(subword_sum, weights)
-        #     composed_entity_embeddings.append(weights * tf.reduce_sum(subword_embeddings[subword_ids], axis=-1) + bias)
-        # composed_entity_embeddings = tf.stack(composed_entity_embeddings)
-        #
-        # norms = tf.norm(composed_entity_embeddings - entity_embeddings, ord='2', axis=-1)
-        # return tf.reduce_mean(norms)
-        #
+    # ex
+    #
+    #
+    #
+    # weights = tf.get_variable(
+    #     "composition_weights",
+    #     shape=[oscar_config.embedding_size, oscar_config.entity_embbedding_size],
+    #     initializer=create_initializer(oscar_config.initializer_range))
+    # bias = tf.get_variable(
+    #     "composition_bias", shape=[oscar_config.entity_embbedding_size],
+    #     initializer=tf.zeros_initializer())
+    #
+    # for subword_ids in entity_mapping:
+    #     subword_sum = tf.reduce_sum(subword_embeddings, axis=-1)
+    #     tf.matmul(subword_sum, weights)
+    #     composed_entity_embeddings.append(weights * tf.reduce_sum(subword_embeddings[subword_ids], axis=-1) + bias)
+    # composed_entity_embeddings = tf.stack(composed_entity_embeddings)
+    #
+    # norms = tf.norm(composed_entity_embeddings - entity_embeddings, ord='2', axis=-1)
+    # return tf.reduce_mean(norms)
+    #
 
 
 class TrieNode(object):
@@ -211,7 +211,7 @@ class TrieNode(object):
             head = sequence[0]
             tail = sequence[1:]
             if head not in self.children:
-                 self.children[head] = TrieNode()
+                self.children[head] = TrieNode()
             self.children[head].add(tail, value)
 
 
@@ -233,6 +233,17 @@ class SubwordTrie:
 
 def load_numberbatch(entity_embedding_path):
     import gzip
+    stopwords = {'ourselves', 'hers', 'between', 'yourself', 'but', 'again', 'there', 'about', 'once', 'during',
+                 'out', 'very', 'having', 'with', 'they', 'own', 'an', 'be', 'some', 'for', 'do', 'its', 'yours',
+                 'such', 'into', 'of', 'most', 'itself', 'other', 'off', 'is', 's', 'am', 'or', 'who', 'as', 'from',
+                 'him', 'each', 'the', 'themselves', 'until', 'below', 'are', 'we', 'these', 'your', 'his',
+                 'through', 'don', 'nor', 'me', 'were', 'her', 'more', 'himself', 'this', 'down', 'should', 'our',
+                 'their', 'while', 'above', 'both', 'up', 'to', 'ours', 'had', 'she', 'all', 'no', 'when', 'at',
+                 'any', 'before', 'them', 'same', 'and', 'been', 'have', 'in', 'will', 'on', 'does', 'yourselves',
+                 'then', 'that', 'because', 'what', 'over', 'why', 'so', 'can', 'did', 'not', 'now', 'under', 'he',
+                 'you', 'herself', 'has', 'just', 'where', 'too', 'only', 'myself', 'which', 'those', 'i', 'after',
+                 'few', 'whom', 't', 'being', 'if', 'theirs', 'my', 'against', 'a', 'by', 'doing', 'it', 'how',
+                 'further', 'was', 'here', 'than'}
     with gzip.open(entity_embedding_path, "rt") as reader:
         num_entities, size = next(reader).split(maxsplit=2)
         embeddings = np.zeros(shape=(int(num_entities), int(size)), dtype=np.float32)
@@ -240,12 +251,13 @@ def load_numberbatch(entity_embedding_path):
         vocab = collections.OrderedDict()
         for line in reader:
             fields = line.split()
-            entity = fields[0]
+            entity = fields[0].lower()
             if all(ord(c) < 128 for c in entity):
                 entity = entity.replace('_', ' ').strip()
-                vocab[entity] = index
-                embeddings[index] = np.asarray(fields[1:], dtype=np.float32)
-                index += 1
+                if len(entity) > 2 and entity not in stopwords:
+                    vocab[entity] = index
+                    embeddings[index] = np.asarray(fields[1:], dtype=np.float32)
+                    index += 1
     return vocab, embeddings
 
 
@@ -260,4 +272,19 @@ def find_entities(inputs, entity_trie):
                 break
             for value in node.values:
                 matches.append((i, j + 1, value))
+    return matches
+
+
+def find_longest_entities(inputs, entity_trie):
+    L = len(inputs)
+    matches = []
+    for i in range(L):
+        node = entity_trie
+        for j in range(i, L):
+            child = node.children.get(inputs[j])
+            if not child:
+                for value in node.values:
+                    matches.append((i, j + 1, value))
+                break
+            node = child
     return matches
