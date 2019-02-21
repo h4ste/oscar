@@ -721,7 +721,7 @@ def main(_):
     model_fn = model_fn_builder(
         oscar_config=oscar_config,
         init_checkpoint=FLAGS.init_checkpoint,
-        learning_rate=FLAGS.learning_rate if not FLAGS.horovod else FLAGS.leearning_rate * hvd.size(),
+        learning_rate=FLAGS.learning_rate if not FLAGS.horovod else FLAGS.learning_rate * hvd.size(),
         num_train_steps=FLAGS.num_train_steps,
         num_warmup_steps=FLAGS.num_warmup_steps,
         use_tpu=FLAGS.use_tpu,
