@@ -19,6 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import os
+import time
 
 import numpy as np
 import tensorflow as tf
@@ -122,11 +123,57 @@ flags.DEFINE_integer(
     "num_tpu_cores", 8,
     "Only used if `use_tpu` is True. Total number of TPU cores to use.")
 
+flags.DEFINE_bool("horovod", False, "Whether to use Horovod for multi-gpu runs")
+
+flags.DEFINE_bool("report_loss", False, "Whether to report total loss during training.")
+
+flags.DEFINE_bool("use_fp16", False, "Whether to use fp32 or fp16 arithmetic on GPU.")
+
+flags.DEFINE_bool("use_xla", False, "Whether to enable XLA JIT compilation.")
+
+
+# report samples/sec, total loss and learning rate during training
+# noinspection PyAttributeOutsideInit
+class _LogSessionRunHook(tf.train.SessionRunHook):
+    def __init__(self, global_batch_size, display_every=10, hvd_rank=-1):
+        self.global_batch_size = global_batch_size
+        self.display_every = display_every
+        self.hvd_rank = hvd_rank
+
+    def after_create_session(self, session, coord):
+        print('  Step samples/sec   MLM Loss  NSP Loss  Loss  Learning-rate')
+        self.elapsed_secs = 0.
+        self.count = 0
+
+    def before_run(self, run_context):
+        self.t0 = time.time()
+        return tf.train.SessionRunArgs(
+            fetches=['step_update:0', 'total_loss:0',
+                     'learning_rate:0', 'nsp_loss:0',
+                     'mlm_loss:0', 'osc_loss:0'])
+
+    def after_run(self, run_context, run_values):
+        self.elapsed_secs += time.time() - self.t0
+        self.count += 1
+        global_step, total_loss, lr, nsp_loss, mlm_loss, osc_loss = run_values.results
+        print_step = global_step + 1  # One-based index for printing.
+        if print_step == 1 or print_step % self.display_every == 0:
+            dt = self.elapsed_secs / self.count
+            img_per_sec = self.global_batch_size / dt
+            if self.hvd_rank >= 0:
+                print('%2d :: %6i %11.1f %10.4e %10.4e %10.4e %6.3f     %6.4e' %
+                      (self.hvd_rank, print_step, img_per_sec, mlm_loss, nsp_loss, osc_loss, total_loss, lr))
+            else:
+                print('%6i %11.1f %10.4e %10.4e %10.4e %6.3f     %6.4e' %
+                      (print_step, img_per_sec, mlm_loss, nsp_loss, osc_loss, total_loss, lr))
+            self.elapsed_secs = 0.
+            self.count = 0
+
 
 def model_fn_builder(oscar_config, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
                      use_one_hot_embeddings,
-                     optimizer_fn=optimization.create_optimizer):
+                     hvd=None):
     """Returns `model_fn` closure for TPUEstimator."""
 
     # noinspection PyUnusedLocal
@@ -158,7 +205,8 @@ def model_fn_builder(oscar_config, init_checkpoint, learning_rate,
             input_ids=input_ids,
             input_mask=input_mask,
             token_type_ids=segment_ids,
-            use_one_hot_embeddings=use_one_hot_embeddings)
+            use_one_hot_embeddings=use_one_hot_embeddings,
+            compute_type=tf.float16 if FLAGS.use_fp16 else tf.float32)
 
         (masked_lm_loss,
          masked_lm_example_loss, masked_lm_log_probs) = get_masked_lm_output(
@@ -175,14 +223,14 @@ def model_fn_builder(oscar_config, init_checkpoint, learning_rate,
                                                             entity_positions,
                                                             entity_lengths)
 
+        masked_lm_loss = tf.identity(masked_lm_loss, "mlm_loss")
+        next_sentence_loss = tf.identity(next_sentence_loss, "nsp_loss")
+        entity_loss = tf.identity(entity_loss, "osc_loss")
+
         total_loss = masked_lm_loss + next_sentence_loss + entity_loss
+        total_loss = tf.identity(total_loss, name='total_loss')
 
         tvars = tf.trainable_variables()
-
-        tf.logging.info("Placeholder V2:, %s",
-                        [x for x in tf.get_default_graph().get_operations() if x.type == "PlaceholderV2"])
-        tf.logging.info("Placeholder V1:, %s",
-                        [x for x in tf.get_default_graph().get_operations() if x.type == "Placeholder"])
 
         gvars = tf.global_variables()
         tf.logging.info("*** Global Variables ***")
@@ -192,7 +240,7 @@ def model_fn_builder(oscar_config, init_checkpoint, learning_rate,
 
         initialized_variable_names = {}
         scaffold_fn = None
-        if init_checkpoint:
+        if init_checkpoint and (hvd is None or hvd.rank() == 0):
             (assignment_map, initialized_variable_names
              ) = modeling.get_assignment_map_from_checkpoint(tvars, init_checkpoint)
             if use_tpu:
@@ -210,13 +258,14 @@ def model_fn_builder(oscar_config, init_checkpoint, learning_rate,
             init_string = ""
             if var.name in initialized_variable_names:
                 init_string = ", *INIT_FROM_CKPT*"
-            tf.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
+            tf.logging.info("  %d :: name = %s, shape = %s%s", 0 if hvd is None else hvd.rank(), var.name, var.shape,
                             init_string)
 
         output_spec = None
         if mode == tf.estimator.ModeKeys.TRAIN:
-            train_op = optimizer_fn(
-                total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
+            train_op = optimization.create_optimizer(
+                total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu,
+                hvd, FLAGS.use_fp16)
 
             output_spec = tf.contrib.tpu.TPUEstimatorSpec(
                 mode=mode,
@@ -463,7 +512,8 @@ def input_fn_builder(input_files,
                      entities,
                      embeddings,
                      is_training,
-                     num_cpu_threads=4):
+                     num_cpu_threads=4,
+                     hvd=None):
     """Creates an `input_fn` closure to be passed to TPUEstimator."""
 
     inv_entities = {v: k for k, v in entities.items()}
@@ -499,6 +549,8 @@ def input_fn_builder(input_files,
         # For eval, we want no shuffling and parallel reading doesn't matter.
         if is_training:
             d = tf.data.Dataset.from_tensor_slices(tf.constant(input_files))
+            if hvd is not None:
+                d = d.shard(hvd.size(), hvd.rank())
             d = d.repeat()
             d = d.shuffle(buffer_size=len(input_files))
 
@@ -603,6 +655,10 @@ def main(_):
     if not FLAGS.do_train and not FLAGS.do_eval:
         raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
+    if FLAGS.horovod:
+        import horovod.tensorflow as hvd
+        hvd.init()
+
     oscar_config = oscar.OscarConfig.from_json_file(FLAGS.oscar_config_file)
 
     tf.gfile.MakeDirs(FLAGS.output_dir)
@@ -627,26 +683,46 @@ def main(_):
         tf.logging.log_every_n(tf.logging.INFO, 'Adding %s as %s:%d', len(entities) / 100,
                                entity, path, i)
 
+    config = tf.ConfigProto()
+    if FLAGS.horovod:
+        config.gpu_options.visible_device_list = str(hvd.local_rank())
+    if FLAGS.use_xla:
+        config.graph_options.optimizer_options.global_jit_level = tf.OptimizerOptions.ON_1
+        config.gpu_options.allow_growth = True
+
     is_per_host = tf.contrib.tpu.InputPipelineConfig.PER_HOST_V2
     run_config = tf.contrib.tpu.RunConfig(
         cluster=tpu_cluster_resolver,
         master=FLAGS.master,
         model_dir=FLAGS.output_dir,
-        save_checkpoints_steps=FLAGS.save_checkpoints_steps,
+        save_checkpoints_steps=FLAGS.save_checkpoints_steps if not FLAGS.horovod or hvd.rank() == 0 else None,
         tpu_config=tf.contrib.tpu.TPUConfig(
             iterations_per_loop=FLAGS.iterations_per_loop,
             num_shards=FLAGS.num_tpu_cores,
-            per_host_input_for_training=is_per_host))
+            per_host_input_for_training=is_per_host),
+        # This variable controls how often estimator reports examples/sec.
+        # Default value is every 100 steps.
+        # When --report_loss is True, we set to very large value to prevent
+        # default info reporting from estimator.
+        # Ideally we should set it to None, but that does not work.
+        log_step_count_steps=10000 if FLAGS.report_loss else 100)
 
     model_fn = model_fn_builder(
         oscar_config=oscar_config,
         init_checkpoint=FLAGS.init_checkpoint,
-        learning_rate=FLAGS.learning_rate,
+        learning_rate=FLAGS.learning_rate if not FLAGS.horovod else FLAGS.leearning_rate * hvd.size(),
         num_train_steps=FLAGS.num_train_steps,
         num_warmup_steps=FLAGS.num_warmup_steps,
         use_tpu=FLAGS.use_tpu,
-        use_one_hot_embeddings=FLAGS.use_tpu)
+        use_one_hot_embeddings=FLAGS.use_tpu,
+        hvd=None if not FLAGS.horovod else hvd)
 
+    training_hooks = []
+    if FLAGS.horovod and hvd.size() > 1:
+        training_hooks.append(hvd.BroadcastGlobalVariablesHook(0))
+    if FLAGS.report_loss:
+        global_batch_size = FLAGS.train_batch_size if not FLAGS.horovod else FLAGS.train_batch_size * hvd.size()
+        training_hooks.append(_LogSessionRunHook(global_batch_size, 1, -1 if not FLAGS.horovod else hvd.rank()))
     # If TPU is not available, this will fall back to normal Estimator on CPU
     # or GPU.
     estimator = tf.contrib.tpu.TPUEstimator(
@@ -665,6 +741,7 @@ def main(_):
             max_seq_length=FLAGS.max_seq_length,
             max_predictions_per_seq=FLAGS.max_predictions_per_seq,
             is_training=True,
+            hvd=None if not FLAGS.horovod else hvd,
             max_entities_per_seq=FLAGS.max_entities_per_seq,
             entity_trie=entity_trie,
             entities=entities,
@@ -673,7 +750,7 @@ def main(_):
         estimator.train(input_fn=train_input_fn, max_steps=FLAGS.num_train_steps)
         # hooks=[hook])
 
-    if FLAGS.do_eval:
+    if FLAGS.do_eval and (not FLAGS.horovod or hvd.rank() == 0):
         tf.logging.info("***** Running evaluation *****")
         tf.logging.info("  Batch size = %d", FLAGS.eval_batch_size)
 
@@ -682,6 +759,7 @@ def main(_):
             max_seq_length=FLAGS.max_seq_length,
             max_predictions_per_seq=FLAGS.max_predictions_per_seq,
             is_training=False,
+            hvd=None if not FLAGS.horovod else hvd,
             max_entities_per_seq=FLAGS.max_entities_per_seq,
             entity_trie=entity_trie,
             entities=entities,

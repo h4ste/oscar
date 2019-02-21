@@ -601,7 +601,7 @@ def file_based_convert_examples_to_features(
 
 
 def file_based_input_fn_builder(input_file, seq_length, is_training,
-                                drop_remainder):
+                                drop_remainder, hvd):
     """Creates an `input_fn` closure to be passed to TPUEstimator."""
 
     name_to_features = {
@@ -634,6 +634,7 @@ def file_based_input_fn_builder(input_file, seq_length, is_training,
         # For eval, we want no shuffling and parallel reading doesn't matter.
         d = tf.data.TFRecordDataset(input_file)
         if is_training:
+            if hvd is not None: d = d.shard(hvd.size(), hvd.rank())
             d = d.repeat()
             d = d.shuffle(buffer_size=100)
 
@@ -666,7 +667,7 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
 
 
 def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
-                 labels, num_labels, use_one_hot_embeddings):
+                 labels, num_labels, use_one_hot_embeddings, compute_type):
     """Creates a classification model."""
     model = modeling.BertModel(
         config=bert_config,
@@ -674,7 +675,8 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
         input_ids=input_ids,
         input_mask=input_mask,
         token_type_ids=segment_ids,
-        use_one_hot_embeddings=use_one_hot_embeddings)
+        use_one_hot_embeddings=use_one_hot_embeddings,
+        compute_type=compute_type)
 
     # In the demo, we are doing a simple classification task on the entire
     # segment.
@@ -718,7 +720,7 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
 
 def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
                      num_train_steps, num_warmup_steps, use_tpu,
-                     use_one_hot_embeddings):
+                     use_one_hot_embeddings, hvd=None):
     """Returns `model_fn` closure for TPUEstimator."""
 
     def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
@@ -742,12 +744,13 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
 
         (total_loss, per_example_loss, logits, probabilities) = create_model(
             bert_config, is_training, input_ids, input_mask, segment_ids, label_ids,
-            num_labels, use_one_hot_embeddings)
+            num_labels, use_one_hot_embeddings, compute_type=tf.float16 if FLAGS.use_fp16 else tf.float32)
+
 
         tvars = tf.trainable_variables()
         initialized_variable_names = {}
         scaffold_fn = None
-        if init_checkpoint:
+        if init_checkpoint and (hvd is None or hvd.rank() == 0):
             (assignment_map, initialized_variable_names
              ) = modeling.get_assignment_map_from_checkpoint(tvars, init_checkpoint)
             if use_tpu:
@@ -765,14 +768,15 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
             init_string = ""
             if var.name in initialized_variable_names:
                 init_string = ", *INIT_FROM_CKPT*"
-            tf.logging.info("  name = %s, shape = %s%s", var.name, var.shape,
+            tf.logging.info("  %d :: name = %s, shape = %s%s", 0 if hvd is None else hvd.rank(), var.name, var.shape,
                             init_string)
 
         output_spec = None
         if mode == tf.estimator.ModeKeys.TRAIN:
 
             train_op = optimization.create_optimizer(
-                total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu)
+                total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu,
+                hvd, FLAGS.use_fp16)
 
             output_spec = tf.contrib.tpu.TPUEstimatorSpec(
                 mode=mode,
@@ -810,7 +814,7 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
 
 # This function is not used by this file but is still used by the Colab and
 # people who depend on it.
-def input_fn_builder(features, seq_length, is_training, drop_remainder):
+def input_fn_builder(features, seq_length, is_training, drop_remainder, hvd=None):
     """Creates an `input_fn` closure to be passed to TPUEstimator."""
 
     all_input_ids = []
@@ -853,6 +857,7 @@ def input_fn_builder(features, seq_length, is_training, drop_remainder):
         })
 
         if is_training:
+            if hvd is not None: d = d.shard(hvd.size(), hvd.rank())
             d = d.repeat()
             d = d.shuffle(buffer_size=100)
 
@@ -899,6 +904,10 @@ def main(_):
         raise ValueError(
             "At least one of `do_train`, `do_eval` or `do_predict' must be True.")
 
+    if FLAGS.horovod:
+        import horovod.tensorflow as hvd
+        hvd.init()
+
     bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
 
     if FLAGS.max_seq_length > bert_config.max_position_embeddings:
@@ -926,16 +935,29 @@ def main(_):
         tpu_cluster_resolver = tf.contrib.cluster_resolver.TPUClusterResolver(
             FLAGS.tpu_name, zone=FLAGS.tpu_zone, project=FLAGS.gcp_project)
 
+    config = tf.ConfigProto()
+    if FLAGS.horovod:
+        config.gpu_options.visible_device_list = str(hvd.local_rank())
+    if FLAGS.use_xla:
+        config.graph_options.optimizer_options.global_jit_level = tf.OptimizerOptions.ON_1
+        config.gpu_options.allow_growth = True
     is_per_host = tf.contrib.tpu.InputPipelineConfig.PER_HOST_V2
     run_config = tf.contrib.tpu.RunConfig(
         cluster=tpu_cluster_resolver,
         master=FLAGS.master,
         model_dir=FLAGS.output_dir,
-        save_checkpoints_steps=FLAGS.save_checkpoints_steps,
+        session_config=config,
+        save_checkpoints_steps=FLAGS.save_checkpoints_steps if not FLAGS.horovod or hvd.rank() == 0 else None,
         tpu_config=tf.contrib.tpu.TPUConfig(
             iterations_per_loop=FLAGS.iterations_per_loop,
             num_shards=FLAGS.num_tpu_cores,
-            per_host_input_for_training=is_per_host))
+            per_host_input_for_training=is_per_host),
+        # This variable controls how often estimator reports examples/sec.
+        # Default value is every 100 steps.
+        # When --report_loss is True, we set to very large value to prevent
+        # default info reporting from estimator.
+        # Ideally we should set it to None, but that does not work.
+        log_step_count_steps=10000 if FLAGS.report_loss else 100)
 
     train_examples = None
     num_train_steps = None
@@ -950,11 +972,12 @@ def main(_):
         bert_config=bert_config,
         num_labels=len(label_list),
         init_checkpoint=FLAGS.init_checkpoint,
-        learning_rate=FLAGS.learning_rate,
+        learning_rate=FLAGS.learning_rate if not FLAGS.horovod else FLAGS.learning_rate*hvd.size(),
         num_train_steps=num_train_steps,
         num_warmup_steps=num_warmup_steps,
         use_tpu=FLAGS.use_tpu,
-        use_one_hot_embeddings=FLAGS.use_tpu)
+        use_one_hot_embeddings=FLAGS.use_tpu,
+        hvd=None if not FLAGS.horovod else hvd)
 
     # If TPU is not available, this will fall back to normal Estimator on CPU
     # or GPU.
@@ -974,14 +997,20 @@ def main(_):
         tf.logging.info("  Num examples = %d", len(train_examples))
         tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
         tf.logging.info("  Num steps = %d", num_train_steps)
+
+        training_hooks = []
+        if FLAGS.horovod and hvd.size() > 1:
+            training_hooks.append(hvd.BroadcastGlobalVariablesHook(0))
+
         train_input_fn = file_based_input_fn_builder(
             input_file=train_file,
             seq_length=FLAGS.max_seq_length,
             is_training=True,
-            drop_remainder=True)
-        estimator.train(input_fn=train_input_fn, max_steps=num_train_steps)
+            drop_remainder=True,
+            hvd=None if not FLAGS.horovod else hvd)
+        estimator.train(input_fn=train_input_fn, hooks=training_hooks, max_steps=num_train_steps)
 
-    if FLAGS.do_eval:
+    if FLAGS.do_eval and (not FLAGS.horovod or hvd.rank() == 0):
         eval_examples = processor.get_dev_examples(FLAGS.data_dir)
         num_actual_eval_examples = len(eval_examples)
         if FLAGS.use_tpu:
@@ -1016,7 +1045,8 @@ def main(_):
             input_file=eval_file,
             seq_length=FLAGS.max_seq_length,
             is_training=False,
-            drop_remainder=eval_drop_remainder)
+            drop_remainder=eval_drop_remainder,
+            hvd=None if not FLAGS.horovod else hvd)
 
         result = estimator.evaluate(input_fn=eval_input_fn, steps=eval_steps)
 
