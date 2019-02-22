@@ -138,6 +138,8 @@ flags.DEFINE_bool("allow_subsumed_entities", False,
                   "Whether to allow subsumed entities (e.g., whether to allow 'dog' to be recognized if 'hot dog' is "
                   "recognized.)")
 
+flags.DEFINE_bool("allow_masked_entities", False, "Whether to allow entities to span across masked tokens.")
+
 
 # report samples/sec, total loss and learning rate during training
 # noinspection PyAttributeOutsideInit
@@ -592,19 +594,29 @@ def input_fn_builder(input_files,
 
                 if FLAGS.allow_subsumed_entities:
                     _entities = oscar.find_entities(input_ids, entity_trie.trie)
-                else:
-                    _entities = oscar.find_longest_entities(input_ids, entity_trie.trie)
 
-                if _entities:
-                    starts, ends, _ids = zip(*_entities)
-
-                    tf.logging.log_every_n(tf.logging.INFO, 'Sequence: %s', input_ids.shape[0] * 100,
+                    tf.logging.log_first_n(tf.logging.INFO, 'Sequence: %s\nAll Entities: %s', 5,
                                            [t for t in entity_trie.tokenizer.convert_ids_to_tokens(input_ids) if
-                                            t != '[PAD]'])
-                    tf.logging.log_every_n(tf.logging.INFO, 'Entities: %s', input_ids.shape[0] * 100,
+                                            t != '[PAD]'],
                                            '; '.join(
                                                ['%s@%d-%d' % (inv_entities[entity[2]], entity[0], entity[1]) for entity
                                                 in _entities]))
+                else:
+                    _entities = oscar.find_longest_entities(input_ids, entity_trie.trie)
+
+                    tf.logging.log_first_n(tf.logging.INFO, 'Sequence: %s\nLongest Entities: %s\nAll Entities: %s', 5,
+                                           [t for t in entity_trie.tokenizer.convert_ids_to_tokens(input_ids) if
+                                            t != '[PAD]'],
+                                           '; '.join(
+                                               ['%s@%d-%d' % (inv_entities[entity[2]], entity[0], entity[1]) for entity
+                                                in _entities]),
+                                           '; '.join(
+                                               ['%s@%d-%d' % (inv_entities[entity[2]], entity[0], entity[1]) for entity
+                                                in oscar.find_entities(input_ids, entity_trie.trie)])
+                                           )
+
+                if _entities:
+                    starts, ends, _ids = zip(*_entities)
 
                     # assert all(start >= 0 for start in starts)
                     # max_len = len(input_ids)
@@ -617,8 +629,33 @@ def input_fn_builder(input_files,
 
                 return entity_embeddings, entity_offsets, entity_lengths - entity_offsets
 
-            _embeddings, offsets, lengths = tf.py_func(find_entities, [example['input_ids']],
-                                                       [tf.float32, tf.int32, tf.int32])
+            if FLAGS.allow_masked_entities:
+                def unmask_find_entities(input_ids, mask_positions, mask_ids):
+                    unmasked_input_ids = np.copy(input_ids)
+                    for position, id_ in (x for x in zip(mask_positions, mask_ids) if x[0] != 0):
+                        unmasked_input_ids[position] = id_
+
+                    tf.logging.log_first_n(tf.logging.INFO, 'Mask Positions: %s\nMask Ids: '
+                                                            '%s\nMasked Tokens: %s\nMasked Sequence: %s\nUnmasked '
+                                                            'Sequence: %s',
+                                           5,
+                                           mask_positions,
+                                           mask_ids,
+                                           [t for t in entity_trie.tokenizer.convert_ids_to_tokens(mask_ids)],
+                                           [t for t in entity_trie.tokenizer.convert_ids_to_tokens(input_ids) if
+                                            t != '[PAD]'],
+                                           [t for t in entity_trie.tokenizer.convert_ids_to_tokens(unmasked_input_ids) if
+                                            t != '[PAD]'])
+
+                    return find_entities(unmasked_input_ids)
+
+                _embeddings, offsets, lengths = tf.py_func(unmask_find_entities,
+                                                           [example['input_ids'], example['masked_lm_positions'],
+                                                            example['masked_lm_ids']],
+                                                           [tf.float32, tf.int32, tf.int32])
+            else:
+                _embeddings, offsets, lengths = tf.py_func(find_entities, [example['input_ids']],
+                                                           [tf.float32, tf.int32, tf.int32])
 
             _embeddings.set_shape([max_entities_per_seq, embedding_width])
             offsets.set_shape([max_entities_per_seq])
@@ -735,7 +772,8 @@ def main(_):
         training_hooks.append(hvd.BroadcastGlobalVariablesHook(0))
     if FLAGS.report_loss:
         global_batch_size = FLAGS.train_batch_size if not FLAGS.horovod else FLAGS.train_batch_size * hvd.size()
-        training_hooks.append(_LogSessionRunHook(global_batch_size, FLAGS.report_loss_iters, -1 if not FLAGS.horovod else hvd.rank()))
+        training_hooks.append(
+            _LogSessionRunHook(global_batch_size, FLAGS.report_loss_iters, -1 if not FLAGS.horovod else hvd.rank()))
     # If TPU is not available, this will fall back to normal Estimator on CPU
     # or GPU.
     estimator = tf.contrib.tpu.TPUEstimator(

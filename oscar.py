@@ -278,13 +278,17 @@ def find_entities(inputs, entity_trie):
 def find_longest_entities(inputs, entity_trie):
     L = len(inputs)
     matches = []
+    seen_ends = set()
     for i in range(L):
         node = entity_trie
         for j in range(i, L):
             child = node.children.get(inputs[j])
             if not child:
-                for value in node.values:
-                    matches.append((i, j + 1, value))
+                if j not in seen_ends:
+                    for value in node.values:
+                        matches.append((i, j, value))
+                    if node.values:
+                        seen_ends.add(j)
                 break
             node = child
     return matches
