@@ -140,6 +140,9 @@ flags.DEFINE_bool("allow_subsumed_entities", False,
 
 flags.DEFINE_bool("allow_masked_entities", False, "Whether to allow entities to span across masked tokens.")
 
+flags.DEFINE_enum("composition_method", "linear", ["linear", "RAN", "TRAN"],
+                  "How to compose token embeddings for oscar loss.")
+
 
 # report samples/sec, total loss and learning rate during training
 # noinspection PyAttributeOutsideInit
@@ -150,9 +153,9 @@ class _LogSessionRunHook(tf.train.SessionRunHook):
         self.hvd_rank = hvd_rank
 
     def after_create_session(self, session, coord):
-        print('  Step samples/sec   MLM Loss  NSP Loss  Loss  Learning-rate')
         self.elapsed_secs = 0.
         self.count = 0
+        print('  Step samples/sec   MLM Loss  NSP Loss  OSC Loss  Loss  Learning-rate')
 
     def before_run(self, run_context):
         self.t0 = time.time()
@@ -170,10 +173,10 @@ class _LogSessionRunHook(tf.train.SessionRunHook):
             dt = self.elapsed_secs / self.count
             img_per_sec = self.global_batch_size / dt
             if self.hvd_rank >= 0:
-                print('%2d :: %6i %11.1f %10.4e %10.4e %10.4e %6.3f     %6.4e' %
+                print('%2d :: %6i %11.1f %10.4g %10.4g %10.4g %6.3f     %6.4e' %
                       (self.hvd_rank, print_step, img_per_sec, mlm_loss, nsp_loss, osc_loss, total_loss, lr))
             else:
-                print('%6i %11.1f %10.4e %10.4e %10.4e %6.3f     %6.4e' %
+                print('%6i %11.1f %10.4g %10.4g %10.4g %6.3f     %6.4e' %
                       (print_step, img_per_sec, mlm_loss, nsp_loss, osc_loss, total_loss, lr))
             self.elapsed_secs = 0.
             self.count = 0
@@ -345,6 +348,13 @@ def model_fn_builder(oscar_config, init_checkpoint, learning_rate,
     return model_fn
 
 
+def _matvecmul(mat, vec, transpose_a=False, transpose_b=False):
+    return tf.squeeze(tf.matmul(mat,
+                                tf.expand_dims(vec, axis=-1),
+                                transpose_a=transpose_a,
+                                transpose_b=transpose_b), axis=-1)
+
+
 def get_oscar_loss(oscar_config,
                    token_embeddings, embedded_entities, entity_offsets, entity_lengths,
                    compute_type=tf.float32):
@@ -356,32 +366,138 @@ def get_oscar_loss(oscar_config,
         max_entities = entity_embedding_shape[1]
         entity_width = entity_embedding_shape[2]
 
-        composed_entities = slice_indexes(token_embeddings, entity_offsets, entity_lengths, compute_type)
+        slice_fn = None
+        with tf.variable_scope('compose'):
+            if FLAGS.composition_method == 'linear':
+                comp_weights = tf.get_variable(
+                    "weights", [oscar_config.hidden_size, oscar_config.hidden_size],
+                    initializer=tf.truncated_normal_initializer(stddev=0.02),
+                    dtype=compute_type)
 
-        flat_lengths = tf.to_float(tf.reshape(entity_lengths, [-1, 1]))
+                comp_bias = tf.get_variable(
+                    "bias", oscar_config.hidden_size, initializer=tf.zeros_initializer(),
+                    dtype=compute_type)
 
+                def slice_fn(slice_):
+                    sum_slice = tf.reduce_sum(slice_, axis=0)  # , keepdims=True)
+                    tf.logging.info("linear::slice_fn::sum_slice: %s", sum_slice)
+                    composed_entity = _matvecmul(comp_weights, sum_slice)
+                    tf.logging.info("linear::slice_fn::scaled_slice: %s", composed_entity)
+                    composed_entity = composed_entity + comp_bias
+                    # composed_entity = tf.matmul(composed_entity, comp_weights)
+                    # composed_entity = tf.nn.bias_add(composed_entity, comp_bias)
+                    return composed_entity
+
+            elif FLAGS.composition_method == 'RAN':
+                content_weight = tf.get_variable(
+                    "content_weights", [oscar_config.hidden_size, oscar_config.hidden_size],
+                    initializer=tf.truncated_normal_initializer(stddev=0.02),
+                    dtype=compute_type)
+
+                input_weights = tf.get_variable(
+                    "input_weights", [2 * oscar_config.hidden_size, oscar_config.hidden_size],
+                    initializer=tf.truncated_normal_initializer(stddev=0.02),
+                    dtype=compute_type)
+
+                input_bias = tf.get_variable(
+                    "input_bias", oscar_config.hidden_size,
+                    initializer=tf.zeros_initializer(),
+                    dtype=compute_type)
+
+                forget_weights = tf.get_variable(
+                    "forget_weights", [2 * oscar_config.hidden_size, oscar_config.hidden_size],
+                    initializer=tf.truncated_normal_initializer(stddev=0.02),
+                    dtype=compute_type)
+
+                forget_bias = tf.get_variable(
+                    "forget_bias", oscar_config.hidden_size,
+                    initializer=tf.zeros_initializer(),
+                    dtype=compute_type)
+
+                def ran_cell(prev, input_):
+                    prev_state, prev_output = prev
+                    content = _matvecmul(content_weight, input_)
+                    flat_input = tf.concat([input_, prev_output], axis=-1)
+                    input_gate = tf.nn.sigmoid(_matvecmul(input_weights, flat_input, transpose_a=True) + input_bias)
+                    forget_gate = tf.nn.sigmoid(_matvecmul(forget_weights, flat_input, transpose_a=True) + forget_bias)
+                    state = input_gate * content + forget_gate * prev_state
+                    output = tf.nn.tanh(state)
+                    return state, output
+
+                initial_state = (tf.zeros(oscar_config.hidden_size, dtype=compute_type),
+                                 tf.zeros(oscar_config.hidden_size, dtype=compute_type))
+
+                def slice_fn(slice_):
+                    state, output = tf.scan(fn=ran_cell, elems=slice_, initializer=initial_state)
+                    tf.logging.info("RAN::slice_fn::state (ignored): %s", state)
+                    tf.logging.info("RAN::slice_fn::output: %s", output)
+                    return output[-1]
+
+            elif FLAGS.composition_method == 'TRAN':
+                input_weights = tf.get_variable(
+                    "input_weights", [2 * oscar_config.hidden_size, oscar_config.hidden_size],
+                    initializer=tf.truncated_normal_initializer(stddev=0.02),
+                    dtype=compute_type)
+
+                input_bias = tf.get_variable(
+                    "input_bias", oscar_config.hidden_size,
+                    initializer=tf.zeros_initializer(),
+                    dtype=compute_type)
+
+                forget_weights = tf.get_variable(
+                    "forget_weights", [2 * oscar_config.hidden_size, oscar_config.hidden_size],
+                    initializer=tf.truncated_normal_initializer(stddev=0.02),
+                    dtype=compute_type)
+
+                forget_bias = tf.get_variable(
+                    "forget_bias", oscar_config.hidden_size,
+                    initializer=tf.zeros_initializer(),
+                    dtype=compute_type)
+
+                def ran_cell(prev_output, input_):
+                    flat_input = tf.concat([input_, prev_output], axis=-1)
+                    input_gate = tf.nn.sigmoid(_matvecmul(input_weights, flat_input, transpose_a=True) + input_bias)
+                    forget_gate = tf.nn.sigmoid(_matvecmul(forget_weights, flat_input, transpose_a=True) + forget_bias)
+                    state = input_gate * input_ + forget_gate * prev_output
+                    return state
+
+                initial_state = tf.zeros(oscar_config.hidden_size, dtype=compute_type)
+
+                def slice_fn(slice_):
+                    state = tf.scan(ran_cell, slice_, initial_state)
+                    return state[-1]
+
+            else:
+                raise NotImplementedError('Composition method %s is not supported.' % FLAGS.composition_method)
+
+        composed_entities = slice_indexes(token_embeddings, entity_offsets, entity_lengths, slice_fn,
+                                          dtype=compute_type)
         tf.logging.info('Entity Slices: %s', composed_entities)
+
         # Composed entities are  [ (batch * max_entities) x token_embedding_size ]
         with tf.variable_scope('project'):
             proj_weights = tf.get_variable(
-                "weights", [entity_width, oscar_config.hidden_size],
-                initializer=tf.truncated_normal_initializer(stddev=0.02))
+                "weights", [oscar_config.hidden_size, entity_width],
+                initializer=tf.truncated_normal_initializer(stddev=0.02),
+                dtype=compute_type)
 
             proj_bias = tf.get_variable(
-                "bias", [1, entity_width], initializer=tf.zeros_initializer())
+                "bias", [entity_width], initializer=tf.zeros_initializer(),
+                dtype=compute_type)
 
-            composed_entities = tf.matmul(composed_entities, proj_weights, transpose_b=True)
-            composed_entities = composed_entities + flat_lengths * proj_bias
+            composed_entities = tf.nn.bias_add(tf.matmul(composed_entities, proj_weights), proj_bias)
 
-        composed_entities = tf.reshape(composed_entities, [batch_size, max_entities, entity_width])
-        difference = tf.norm(embedded_entities - composed_entities, ord=oscar_config.norm_ord)
-        mask = tf.to_float(tf.minimum(entity_lengths, 1))
-        # If we have no entities, we set num_entities = 1 to avoid division by zero
-        num_entities = tf.maximum(tf.reduce_sum(mask, axis=-1), 1)
-        # 1/2 * average l2 difference
-        example_loss = tf.reduce_sum(difference * mask, axis=-1) / (2 * num_entities)
-        loss = tf.reduce_mean(example_loss, axis=-1)
-    return loss, example_loss
+        with tf.variable_scope('loss'):
+            composed_entities = tf.reshape(composed_entities, [batch_size, max_entities, entity_width])
+            difference = tf.norm(embedded_entities - tf.cast(composed_entities, tf.float32), ord=oscar_config.norm_ord)
+            mask = tf.to_float(tf.minimum(entity_lengths, 1))
+            # If we have no entities, we set num_entities = 1 to avoid division by zero
+            num_entities = tf.maximum(tf.reduce_sum(mask, axis=-1), 1)
+            # 1/2 * average l2 difference
+            example_loss = tf.reduce_sum(difference * mask, axis=-1) / (2 * num_entities)
+            loss = tf.reduce_mean(example_loss, axis=-1)
+
+            return loss, example_loss
 
 
 def get_masked_lm_output(bert_config, input_tensor, output_weights, positions,
@@ -453,7 +569,7 @@ def get_next_sentence_output(bert_config, input_tensor, labels):
         return loss, per_example_loss, log_probs
 
 
-def slice_indexes(sequence_tensor, positions, lengths, compute_type=tf.float32):
+def slice_indexes(sequence_tensor, positions, lengths, slice_fn, dtype=tf.float32):
     """Gathers the vectors at the specific positions over a minibatch."""
     sequence_shape = modeling.get_shape_list(sequence_tensor, expected_rank=3)
     batch_size = sequence_shape[0]
@@ -479,18 +595,33 @@ def slice_indexes(sequence_tensor, positions, lengths, compute_type=tf.float32):
 
     tf.logging.info('Slice::flat_sequence_tensor: %s', flat_sequence_tensor)
 
-    def slice_fn(tensors):
-        _slice = tf.slice(flat_sequence_tensor, tensors[0], tensors[1])
-        _slice.set_shape([None, width])
-        tf.logging.info('Slice::slice: %s', _slice)
-        aggregate_slice = tf.reduce_sum(_slice, axis=0)
-        tf.logging.info('Slice::aggregate_slice: %s', aggregate_slice)
-        return tf.cast(aggregate_slice, tf.float32)
+    empty_slice = tf.zeros(width, dtype=dtype)
 
-    output_tensors = tf.map_fn(slice_fn, [flat_2d_positions, flat_2d_lengths], dtype=tf.float32, infer_shape=True)
-    tf.logging.info('Slice::output_tensors: %s', output_tensors)
+    def slice_fn_wrapper(tensors):
+        position, length = tensors
 
-    return output_tensors
+        def true_fn():
+            slice_ = tf.slice(flat_sequence_tensor, position, length)
+            slice_.set_shape([None, width])
+            tf.logging.info('Slice Indices::slice_fn_wrapper::true::slice: %s', slice_)
+            transformed_slice = slice_fn(slice_)
+            tf.logging.info('Slice Indices::slice_fn_wrapper::true::transformed_slice: %s', transformed_slice)
+            return transformed_slice
+
+        def false_fn():
+            tf.logging.info('Slice Indices::slice_fn_wrapper::false::empty_slice: %s', empty_slice)
+            return empty_slice
+
+        tf.logging.info('Slice Indices::slice_fn_wrapper::position: %s', position)
+        tf.logging.info('Slice Indices::slice_fn_wrapper::length: %s', length)
+
+        return tf.cond(tf.greater(length[0], 0), true_fn, false_fn)
+
+    transformed_slices = tf.map_fn(slice_fn_wrapper, (flat_2d_positions, flat_2d_lengths), dtype=dtype,
+                                   infer_shape=True)
+    tf.logging.info('Slice Indices::transformed_slices: %s', transformed_slices)
+
+    return transformed_slices
 
 
 def gather_indexes(sequence_tensor, positions):
@@ -644,7 +775,8 @@ def input_fn_builder(input_files,
                                            [t for t in entity_trie.tokenizer.convert_ids_to_tokens(mask_ids)],
                                            [t for t in entity_trie.tokenizer.convert_ids_to_tokens(input_ids) if
                                             t != '[PAD]'],
-                                           [t for t in entity_trie.tokenizer.convert_ids_to_tokens(unmasked_input_ids) if
+                                           [t for t in entity_trie.tokenizer.convert_ids_to_tokens(unmasked_input_ids)
+                                            if
                                             t != '[PAD]'])
 
                     return find_entities(unmasked_input_ids)
