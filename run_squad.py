@@ -778,8 +778,6 @@ def input_fn_builder(input_file, seq_length, is_training, drop_remainder, hvd=No
         # For eval, we want no shuffling and parallel reading doesn't matter.
         d = tf.data.TFRecordDataset(input_file)
         if is_training:
-            if hvd is not None:
-                d = d.shard(hvd.size(), hvd.rank())
             d = d.repeat()
             d = d.shuffle(buffer_size=100)
 
