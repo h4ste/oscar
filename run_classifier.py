@@ -73,6 +73,8 @@ flags.DEFINE_bool("do_train", False, "Whether to run training.")
 
 flags.DEFINE_bool("do_eval", False, "Whether to run eval on the dev set.")
 
+flags.DEFINE_bool("do_test", False, "Whether to run eval on the test set.")
+
 flags.DEFINE_bool(
     "do_predict", False,
     "Whether to run the model in inference mode on the test set.")
@@ -82,6 +84,8 @@ flags.DEFINE_integer("train_batch_size", 32, "Total batch size for training.")
 flags.DEFINE_integer("eval_batch_size", 8, "Total batch size for eval.")
 
 flags.DEFINE_integer("predict_batch_size", 8, "Total batch size for predict.")
+
+flags.DEFINE_integer("test_batch_size", 8, "Total batch size for test.")
 
 flags.DEFINE_float("learning_rate", 5e-5, "The initial learning rate for Adam.")
 
@@ -93,7 +97,7 @@ flags.DEFINE_float(
     "Proportion of training to perform linear learning rate warmup for. "
     "E.g., 0.1 = 10% of training.")
 
-flags.DEFINE_integer("save_checkpoints_steps", 1000,
+flags.DEFINE_integer("save_checkpoints_steps", 100,
                      "How often to save the model checkpoint.")
 
 flags.DEFINE_integer("iterations_per_loop", 1000,
@@ -125,6 +129,58 @@ flags.DEFINE_integer(
     "num_tpu_cores", 8,
     "Only used if `use_tpu` is True. Total number of TPU cores to use.")
 
+flags.DEFINE_bool("horovod", False, "Whether to use Horovod for multi-gpu runs")
+
+flags.DEFINE_bool("report_loss", False, "Whether to report total loss during training.")
+
+flags.DEFINE_integer("report_loss_iters", 10, "How many iterations between loss reports")
+
+flags.DEFINE_bool("use_fp16", False, "Whether to use fp32 or fp16 arithmetic on GPU.")
+
+flags.DEFINE_bool("use_xla", False, "Whether to enable XLA JIT compilation.")
+
+flags.DEFINE_bool("debug", False, "Enabled TensorFlow debugging")
+
+
+# # report samples/sec, total loss and learning rate during training
+# # noinspection PyAttributeOutsideInit
+# class _LogSessionRunHook(tf.train.SessionRunHook):
+#     def __init__(self, global_batch_size, display_every=10, hvd_rank=-1):
+#         self.global_batch_size = global_batch_size
+#         self.display_every = display_every
+#         self.hvd_rank = hvd_rank
+#
+#     def after_create_session(self, session, coord):
+#         self.elapsed_secs = 0.
+#         self.count = 0
+#         print('%24s %10s %10s %10s %10s %10s %10s %10s :: %6s' %
+#               ('Step samples/sec', 'Loss', 'Accuracy', 'Precision', 'Recall', 'F1', 'AUROC', 'AUPR', 'LR'))
+#
+#     def before_run(self, run_context):
+#         self.t0 = time.time()
+#         return tf.train.SessionRunArgs(
+#             fetches=['step_update:0', 'train_loss:0',
+#                      'learning_rate:0', 'train_accuracy:0',
+#                      'train_precision:0', 'train_recall:0',
+#                      'train_f1:0', 'train_auroc:0', 'train_aupr:0'])
+#
+#     def after_run(self, run_context, run_values):
+#         self.elapsed_secs += time.time() - self.t0
+#         self.count += 1
+#         global_step, loss, lr, acc, prec, rec, f1, roc, pr = run_values.results
+#         print_step = global_step + 1  # One-based index for printing.
+#         if print_step == 1 or print_step % self.display_every == 0:
+#             dt = self.elapsed_secs / self.count
+#             img_per_sec = self.global_batch_size / dt
+#             if self.hvd_rank >= 0:
+#                 print('%2d :: %6i %11.1f %10.4g %10.4g %10.4g %10.4g %10.4g %10.4g %10.4g :: %6.4e' %
+#                       (self.hvd_rank, print_step, img_per_sec, loss, acc, prec, rec, f1, roc, pr, lr))
+#             else:
+#                 print('%12i %11.1f %10.4g %10.4g %10.4g %10.4g %10.4g %10.4g %10.4g :: %6.4e' %
+#                       (print_step, img_per_sec, loss, acc, prec, rec, f1, roc, pr, lr))
+#             self.elapsed_secs = 0.
+#             self.count = 0
+
 
 class InputExample(object):
     """A single training/test example for simple sequence classification."""
@@ -147,7 +203,7 @@ class InputExample(object):
         self.label = label
 
 
-class PaddingInputExample(object):
+class PaddingInputExample(InputExample):
     """Fake example so the num input examples is a multiple of the batch size.
 
     When running eval/predict on the TPU, we need to pad the number of examples
@@ -156,8 +212,12 @@ class PaddingInputExample(object):
     the entire output data won't be generated.
 
     We use this class instead of `None` because treating `None` as padding
-    battches could cause silent errors.
+    batches could cause silent errors.
     """
+
+    # noinspection PyMissingConstructor
+    def __init__(self):
+        pass
 
 
 class InputFeatures(object):
@@ -196,16 +256,17 @@ class DataProcessor(object):
         raise NotImplementedError()
 
     @classmethod
-    def _read_tsv(cls, input_file, quotechar=None):
+    def _read_tsv(cls, input_file, quotechar=None, delimiter='\t'):
         """Reads a tab separated value file."""
         with tf.gfile.Open(input_file, "r") as f:
-            reader = csv.reader(f, delimiter="\t", quotechar=quotechar)
+            reader = csv.reader(f, delimiter=delimiter, quotechar=quotechar)
             lines = []
             for line in reader:
                 lines.append(line)
             return lines
 
 
+# noinspection PyAbstractClass
 class XnliProcessor(DataProcessor):
     """Processor for the XNLI data set."""
 
@@ -221,7 +282,7 @@ class XnliProcessor(DataProcessor):
         for (i, line) in enumerate(lines):
             if i == 0:
                 continue
-            guid = "train-%d" % (i)
+            guid = "train-%d" % i
             text_a = tokenization.convert_to_unicode(line[0])
             text_b = tokenization.convert_to_unicode(line[1])
             label = tokenization.convert_to_unicode(line[2])
@@ -238,7 +299,7 @@ class XnliProcessor(DataProcessor):
         for (i, line) in enumerate(lines):
             if i == 0:
                 continue
-            guid = "dev-%d" % (i)
+            guid = "dev-%d" % i
             language = tokenization.convert_to_unicode(line[0])
             if language != tokenization.convert_to_unicode(self.language):
                 continue
@@ -254,6 +315,7 @@ class XnliProcessor(DataProcessor):
         return ["contradiction", "entailment", "neutral"]
 
 
+# noinspection PyAbstractClass
 class MnliProcessor(DataProcessor):
     """Processor for the MultiNLI data set (GLUE version)."""
 
@@ -277,6 +339,7 @@ class MnliProcessor(DataProcessor):
         """See base class."""
         return ["contradiction", "entailment", "neutral"]
 
+    # noinspection PyMethodMayBeStatic
     def _create_examples(self, lines, set_type):
         """Creates examples for the training and dev sets."""
         examples = []
@@ -295,6 +358,7 @@ class MnliProcessor(DataProcessor):
         return examples
 
 
+# noinspection PyAbstractClass
 class MrpcProcessor(DataProcessor):
     """Processor for the MRPC data set (GLUE version)."""
 
@@ -317,6 +381,7 @@ class MrpcProcessor(DataProcessor):
         """See base class."""
         return ["0", "1"]
 
+    # noinspection PyMethodMayBeStatic
     def _create_examples(self, lines, set_type):
         """Creates examples for the training and dev sets."""
         examples = []
@@ -357,6 +422,7 @@ class ColaProcessor(DataProcessor):
         """See base class."""
         return ["0", "1"]
 
+    # noinspection PyMethodMayBeStatic
     def _create_examples(self, lines, set_type):
         """Creates examples for the training and dev sets."""
         examples = []
@@ -376,17 +442,47 @@ class ColaProcessor(DataProcessor):
         return examples
 
 
-class CopaProcessor(DataProcessor):
-
-    def get_train_examples(self, data_dir):
-        return self._get_examples(os.path.join(data_dir, 'copa-dev.xml'), 'train')
-
-    def get_dev_examples(self, data_dir):
-        return self._get_examples(os.path.join(data_dir, 'copa-test.xml'), 'dev')
+# noinspection PyAbstractClass
+class PairedDataProcessor(DataProcessor):
 
     def get_labels(self):
         """See base class."""
-        return ['0', '1']
+        return ['implausible', 'plausible']
+
+    # noinspection PyMethodMayBeStatic
+    def _create_alternative_pair(self, premise, alternative_1, alternative_2, answer, guid,
+                                 label_true='plausible', label_false='implausible', invert_order=False):
+        if int(answer) == 1:
+            label_1 = label_true
+            label_2 = label_false
+        elif int(answer) == 2:
+            label_1 = label_false
+            label_2 = label_true
+        else:
+            raise IndexError('Answer must be 1 or 2 not %s' % answer)
+
+        if invert_order:
+            return [
+                InputExample(guid='%sr-1' % guid, text_a=alternative_1, text_b=premise, label=label_1),
+                InputExample(guid='%sr-2' % guid, text_a=alternative_2, text_b=premise, label=label_2)
+            ]
+        else:
+            return [
+                InputExample(guid='%s-1' % guid, text_a=premise, text_b=alternative_1, label=label_1),
+                InputExample(guid='%s-2' % guid, text_a=premise, text_b=alternative_2, label=label_2)
+            ]
+
+
+# noinspection PyAbstractClass
+class CopaProcessor(PairedDataProcessor):
+
+    def get_train_examples(self, data_dir):
+        return self._get_examples(
+            os.path.join(data_dir, 'copa-dev.xml'), 'train')
+
+    def get_test_examples(self, data_dir):
+        return self._get_examples(
+            os.path.join(data_dir, 'copa-test.xml'), 'test')
 
     def _get_examples(self, xml_file, set_type):
         # noinspection PyPep8Naming
@@ -396,7 +492,7 @@ class CopaProcessor(DataProcessor):
         tree = ET.parse(xml_file)
         root = tree.getroot()  # type: ET.Element
         for item in root:
-            id = int(item.attrib['id'])
+            id_ = int(item.attrib['id'])
             direction = item.attrib['asks-for']
             answer = int(item.attrib['most-plausible-alternative'])
 
@@ -404,45 +500,75 @@ class CopaProcessor(DataProcessor):
             alternative_1 = tokenization.convert_to_unicode(item.findtext('a1'))
             alternative_2 = tokenization.convert_to_unicode(item.findtext('a2'))
 
-            if answer == 1:
-                label_1 = '1'
-                label_2 = '0'
-            else:
-                label_1 = '0'
-                label_2 = '1'
+            examples.extend(
+                self._create_alternative_pair(premise, alternative_1, alternative_2, answer,
+                                              guid='%s-%d' % (set_type, id_),
+                                              invert_order=(direction == 'cause')))
 
-            if direction == 'cause':
+        return examples
 
-                examples.extend([
-                    InputExample(guid='%s-q%d-a1r' % (set_type, id), text_a=alternative_1, text_b=premise,
-                                 label=label_1),
-                    InputExample(guid='%s-q%d-a2r' % (set_type, id), text_a=alternative_2, text_b=premise,
-                                 label=label_2)
-                ])
-            else:
-                examples.extend([
-                    InputExample(guid='%s-q%d-a1' % (set_type, id), text_a=premise, text_b=alternative_1,
-                                 label=label_1),
-                    InputExample(guid='%s-q%d-a2' % (set_type, id), text_a=premise, text_b=alternative_2,
-                                 label=label_2)
-                ])
 
+# noinspection PyAbstractClass
+class NarrativeClozeProcessor(PairedDataProcessor):
+
+    def get_train_examples(self, data_dir):
+        return self._create_examples(
+            self._read_tsv(os.path.join(data_dir, 'cloze_test_val__spring2016.tsv')), 'train')
+
+    def get_test_examples(self, data_dir):
+        return self._create_examples(
+            self._read_tsv(os.path.join(data_dir, 'cloze_test_test__spring2016.tsv')), 'test')
+
+    def get_labels(self):
+        """See base class."""
+        return ['implausible', 'plausible']
+
+    def _create_examples(self, lines, set_type):
+        """Creates examples for the training and dev sets."""
+        examples = []
+        for (i, line) in enumerate(lines):
+            # Skip the header
+            if i == 0:
+                continue
+            guid = "%s-%d" % (set_type, i)
+
+            premise = tokenization.convert_to_unicode(' '.join(line[1:5]))
+            alternative_1 = tokenization.convert_to_unicode(line[5])
+            alternative_2 = tokenization.convert_to_unicode(line[6])
+            answer = line[7]
+
+            examples.extend(
+                self._create_alternative_pair(premise, alternative_1, alternative_2, answer, guid))
         return examples
 
 
 class RqeProcessor(DataProcessor):
 
     def get_train_examples(self, data_dir):
-        return self._get_examples(os.path.join(data_dir, 'RQE_Train_8588_AMIA2016.xml'), 'train')
+        return self._create_examples(os.path.join(data_dir, 'RQE_Train_8588_AMIA2016.xml'), 'train')
+
+    def get_test_examples(self, data_dir):
+        return self._create_examples(os.path.join(data_dir, 'RQE_Test_302_pairs_AMIA2016.xml'), 'dev')
 
     def get_dev_examples(self, data_dir):
-        return self._get_examples(os.path.join(data_dir, 'RQE_Test_302_pairs_AMIA2016.xml'), 'dev')
+        examples = []
+        with tf.gfile.Open(os.path.join(data_dir, 'test_850_CHQs.txt'), 'r') as file:
+            for (i, line) in enumerate(file):
+                fields = line.rstrip('\n').split('|||')
+                chq = tokenization.convert_to_unicode(fields[0])
+                faq = tokenization.convert_to_unicode(fields[1])
+                answer = fields[2]
+
+                ex = InputExample(guid='%s-%d' % ('test', i + 1), text_a=chq, text_b=faq, label=answer)
+                examples.append(ex)
+            return examples
 
     def get_labels(self):
         """See base class."""
         return ['false', 'true']
 
-    def _get_examples(self, xml_file, set_type):
+    # noinspection PyMethodMayBeStatic
+    def _create_examples(self, xml_file, set_type):
         # noinspection PyPep8Naming
         import xml.etree.cElementTree as ET
 
@@ -450,20 +576,15 @@ class RqeProcessor(DataProcessor):
         tree = ET.parse(xml_file)
         root = tree.getroot()  # type: ET.Element
 
-        from collections import Counter
-
         for item in root:
-            id = int(item.attrib['pid'])
+            id_ = int(item.attrib['pid'])
             answer = item.attrib['value']
 
             chq = tokenization.convert_to_unicode(item.findtext('chq'))
             faq = tokenization.convert_to_unicode(item.findtext('faq'))
 
-            ex = InputExample(guid='%s-%d' % (set_type, id), text_a=chq, text_b=faq,
-                              label=answer)
+            ex = InputExample(guid='%s-%d' % (set_type, id_), text_a=chq, text_b=faq, label=answer)
             examples.append(ex)
-
-        # print(Counter([ex.label for ex in examples]))
 
         return examples
 
@@ -553,7 +674,7 @@ def convert_single_example(ex_index, example, label_list, max_seq_length,
     label_id = label_map[example.label]
     if ex_index < 5:
         tf.logging.info("*** Example ***")
-        tf.logging.info("guid: %s" % (example.guid))
+        tf.logging.info("guid: %s" % example.guid)
         tf.logging.info("tokens: %s" % " ".join(
             [tokenization.printable_text(x) for x in tokens]))
         tf.logging.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
@@ -601,7 +722,7 @@ def file_based_convert_examples_to_features(
 
 
 def file_based_input_fn_builder(input_file, seq_length, is_training,
-                                drop_remainder, hvd):
+                                drop_remainder):
     """Creates an `input_fn` closure to be passed to TPUEstimator."""
 
     name_to_features = {
@@ -612,9 +733,9 @@ def file_based_input_fn_builder(input_file, seq_length, is_training,
         "is_real_example": tf.FixedLenFeature([], tf.int64),
     }
 
-    def _decode_record(record, name_to_features):
+    def _decode_record(record, name_to_features_):
         """Decodes a record to a TensorFlow example."""
-        example = tf.parse_single_example(record, name_to_features)
+        example = tf.parse_single_example(record, name_to_features_)
 
         # tf.Example only supports tf.int64, but the TPU only supports tf.int32.
         # So cast all int64 to int32.
@@ -634,7 +755,6 @@ def file_based_input_fn_builder(input_file, seq_length, is_training,
         # For eval, we want no shuffling and parallel reading doesn't matter.
         d = tf.data.TFRecordDataset(input_file)
         if is_training:
-            if hvd is not None: d = d.shard(hvd.size(), hvd.rank())
             d = d.repeat()
             d = d.shuffle(buffer_size=100)
 
@@ -704,7 +824,9 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
 
         # m = tf.reduce_max(logits, axis=-1, keepdims=True)
 
-        probabilities = tf.nn.softmax(logits, axis=-1) + 1e-6
+        # logits = tf.maximum(logits, 1e-8)
+
+        probabilities = tf.nn.softmax(logits, axis=-1) + 1e-8
         # log_probs = tf.nn.log_softmax(logits - m, axis=-1) + m
 
         # one_hot_labels = tf.one_hot(labels, depth=num_labels, dtype=tf.float32)
@@ -715,7 +837,7 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
         per_example_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=logits)
         loss = tf.reduce_mean(per_example_loss)
 
-        return (loss, per_example_loss, logits, probabilities)
+        return loss, per_example_loss, logits, probabilities
 
 
 def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
@@ -723,12 +845,13 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
                      use_one_hot_embeddings, hvd=None):
     """Returns `model_fn` closure for TPUEstimator."""
 
+    # noinspection PyUnusedLocal
     def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
         """The `model_fn` for TPUEstimator."""
 
-        tf.logging.info("*** Features ***")
+        tf.logging.debug("*** Features ***")
         for name in sorted(features.keys()):
-            tf.logging.info("  name = %s, shape = %s" % (name, features[name].shape))
+            tf.logging.debug("  name = %s, shape = %s" % (name, features[name].shape))
 
         input_ids = features["input_ids"]
         input_mask = features["input_mask"]
@@ -746,6 +869,74 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
             bert_config, is_training, input_ids, input_mask, segment_ids, label_ids,
             num_labels, use_one_hot_embeddings, compute_type=tf.float16 if FLAGS.use_fp16 else tf.float32)
 
+        predictions = tf.argmax(logits, axis=-1, output_type=tf.int32)
+
+        is_binary = logits.shape[-1] == 2
+
+        with tf.variable_scope('batch_metrics'):
+            batch_accuracy = tf.reduce_mean(tf.cast(tf.equal(predictions, label_ids), tf.float32))
+            tf.summary.scalar('accuracy', batch_accuracy)
+            tf.summary.scalar('loss', total_loss)
+
+            if is_binary:
+                batch_tp = tf.count_nonzero(predictions * label_ids, dtype=tf.float32)
+                batch_tn = tf.count_nonzero((predictions - 1) * (label_ids - 1), dtype=tf.float32)
+                batch_fp = tf.count_nonzero(predictions * (label_ids - 1), dtype=tf.float32)
+                batch_fn = tf.count_nonzero((predictions - 1) * label_ids, dtype=tf.float32)
+
+                # Batch-level binary classification metrics
+                batch_precision = batch_tp / (batch_tp + batch_fp)
+                batch_recall = batch_tp / (batch_tp + batch_fn)
+                batch_specificity = batch_tn / (batch_tn + batch_fp)
+                batch_f1 = 2 * batch_precision * batch_recall / (batch_precision + batch_recall)
+
+                tf.summary.scalar('precision', batch_precision)
+                tf.summary.scalar('recall', batch_recall)
+                tf.summary.scalar('f1', batch_f1)
+                tf.summary.scalar('TP', batch_tp)
+                tf.summary.scalar('FP', batch_fp)
+                tf.summary.scalar('FN', batch_fn)
+                tf.summary.scalar('TN', batch_tn)
+
+        tf.summary.histogram("logits", logits)
+        tf.summary.histogram("probabilities", probabilities)
+
+        with tf.variable_scope('streaming_metrics'):
+            accuracy = tf.metrics.accuracy(labels=label_ids, predictions=predictions, weights=is_real_example,
+                                           name='accuracy')
+            tf.summary.scalar('accuracy', accuracy[1])
+
+            loss = tf.metrics.mean(values=per_example_loss, weights=is_real_example)
+            tf.summary.scalar('loss', loss[1])
+
+            if is_binary:
+                precision = tf.metrics.precision(labels=label_ids, predictions=predictions, weights=is_real_example,
+                                                 name='precision')
+                recall = tf.metrics.recall(labels=label_ids, predictions=predictions, weights=is_real_example,
+                                           name='recall')
+                f1 = tf.contrib.metrics.f1_score(labels=label_ids, predictions=predictions, weights=is_real_example,
+                                                 name='f1')
+                auroc = tf.metrics.auc(labels=label_ids, predictions=predictions, weights=is_real_example,
+                                       summation_method='careful_interpolation',
+                                       name='auc_roc')
+                aupr = tf.metrics.auc(labels=label_ids, predictions=predictions, weights=is_real_example,
+                                      curve='PR', summation_method='careful_interpolation',
+                                      name='auc_pr')
+
+                tp = tf.metrics.true_positives(labels=label_ids, predictions=predictions, weights=is_real_example)
+                fp = tf.metrics.false_positives(labels=label_ids, predictions=predictions, weights=is_real_example)
+                fn = tf.metrics.false_negatives(labels=label_ids, predictions=predictions, weights=is_real_example)
+                tn = tf.metrics.true_negatives(labels=label_ids, predictions=predictions, weights=is_real_example)
+
+                tf.summary.scalar('Precision', precision[1])
+                tf.summary.scalar('Recall', recall[1])
+                tf.summary.scalar('F1', f1[1])
+                tf.summary.scalar('AUC_ROC', auroc[1])
+                tf.summary.scalar('AUC_PR', aupr[1])
+                tf.summary.scalar('TP', tp[1])
+                tf.summary.scalar('FP', fp[1])
+                tf.summary.scalar('FN', fn[1])
+                tf.summary.scalar('TN', tn[1])
 
         tvars = tf.trainable_variables()
         initialized_variable_names = {}
@@ -763,13 +954,13 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
             else:
                 tf.train.init_from_checkpoint(init_checkpoint, assignment_map)
 
-        tf.logging.info("**** Trainable Variables ****")
+        tf.logging.debug("**** Trainable Variables ****")
         for var in tvars:
             init_string = ""
             if var.name in initialized_variable_names:
                 init_string = ", *INIT_FROM_CKPT*"
-            tf.logging.info("  %d :: name = %s, shape = %s%s", 0 if hvd is None else hvd.rank(), var.name, var.shape,
-                            init_string)
+            tf.logging.debug("  %d :: name = %s, shape = %s%s", 0 if hvd is None else hvd.rank(), var.name, var.shape,
+                             init_string)
 
         output_spec = None
         if mode == tf.estimator.ModeKeys.TRAIN:
@@ -783,16 +974,45 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
                 loss=total_loss,
                 train_op=train_op,
                 scaffold_fn=scaffold_fn)
+
         elif mode == tf.estimator.ModeKeys.EVAL:
 
-            def metric_fn(per_example_loss, label_ids, logits, is_real_example):
-                predictions = tf.argmax(logits, axis=-1, output_type=tf.int32)
-                accuracy = tf.metrics.accuracy(
-                    labels=label_ids, predictions=predictions, weights=is_real_example)
-                loss = tf.metrics.mean(values=per_example_loss, weights=is_real_example)
+            def metric_fn(per_example_loss_, label_ids_, logits_, is_real_example_):
+                predictions_ = tf.argmax(logits_, axis=-1, output_type=tf.int32)
+
+                with tf.variable_scope("evaluation"):
+                    accuracy_ = tf.metrics.accuracy(
+                        labels=label_ids_, predictions=predictions_, weights=is_real_example_)
+                    loss_ = tf.metrics.mean(values=per_example_loss_, weights=is_real_example_)
+
+                    precision_ = tf.metrics.precision(labels=label_ids_, predictions=predictions_,
+                                                     weights=is_real_example_)
+                    recall_ = tf.metrics.recall(labels=label_ids_, predictions=predictions_, weights=is_real_example_)
+                    f1_ = tf.contrib.metrics.f1_score(labels=label_ids, predictions=predictions_,
+                                                     weights=is_real_example_)
+
+                    # noinspection PyPackageRequirements,PyPackageRequirements
+                    from tensorboard import summary as summary_lib
+
+                    prc = summary_lib.pr_curve_streaming_op(name='prcurve', predictions=predictions_, labels=label_ids,
+                                                            weights=is_real_example_)
+
+                    auroc_ = tf.metrics.auc(labels=label_ids_, predictions=predictions_, weights=is_real_example_,
+                                            summation_method='careful_interpolation', name='auc_roc')
+                    aupr_ = tf.metrics.auc(labels=label_ids_, predictions=predictions_, weights=is_real_example_,
+                                           curve='PR', summation_method='careful_interpolation', name='auc_pr')
+
+                    with tf.control_dependencies([prc[1]]):
+                        aupr_ = (aupr_[0], tf.identity(aupr_[1]))
+
                 return {
-                    "eval_accuracy": accuracy,
-                    "eval_loss": loss,
+                    "eval/accuracy": accuracy_,
+                    "eval/loss": loss_,
+                    "eval/precision": precision_,
+                    "eval/recall": recall_,
+                    "eval/f1": f1_,
+                    "eval/auc_roc": auroc_,
+                    "eval/auc_pr": aupr_,
                 }
 
             eval_metrics = (metric_fn,
@@ -814,7 +1034,7 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
 
 # This function is not used by this file but is still used by the Colab and
 # people who depend on it.
-def input_fn_builder(features, seq_length, is_training, drop_remainder, hvd=None):
+def input_fn_builder(features, seq_length, is_training, drop_remainder):
     """Creates an `input_fn` closure to be passed to TPUEstimator."""
 
     all_input_ids = []
@@ -857,7 +1077,6 @@ def input_fn_builder(features, seq_length, is_training, drop_remainder, hvd=None
         })
 
         if is_training:
-            if hvd is not None: d = d.shard(hvd.size(), hvd.rank())
             d = d.repeat()
             d = d.shuffle(buffer_size=100)
 
@@ -894,7 +1113,8 @@ def main(_):
         "mrpc": MrpcProcessor,
         "xnli": XnliProcessor,
         "copa": CopaProcessor,
-        "rqe": RqeProcessor
+        "rqe": RqeProcessor,
+        "cloze": NarrativeClozeProcessor
     }
 
     tokenization.validate_case_matches_checkpoint(FLAGS.do_lower_case,
@@ -905,6 +1125,7 @@ def main(_):
             "At least one of `do_train`, `do_eval` or `do_predict' must be True.")
 
     if FLAGS.horovod:
+        # noinspection PyPackageRequirements,PyUnresolvedReferences
         import horovod.tensorflow as hvd
         hvd.init()
 
@@ -921,7 +1142,7 @@ def main(_):
     task_name = FLAGS.task_name.lower()
 
     if task_name not in processors:
-        raise ValueError("Task not found: %s" % (task_name))
+        raise ValueError("Task not found: %s" % task_name)
 
     processor = processors[task_name]()
 
@@ -947,6 +1168,7 @@ def main(_):
         master=FLAGS.master,
         model_dir=FLAGS.output_dir,
         session_config=config,
+        save_summary_steps=10,
         save_checkpoints_steps=FLAGS.save_checkpoints_steps if not FLAGS.horovod or hvd.rank() == 0 else None,
         tpu_config=tf.contrib.tpu.TPUConfig(
             iterations_per_loop=FLAGS.iterations_per_loop,
@@ -972,12 +1194,12 @@ def main(_):
         bert_config=bert_config,
         num_labels=len(label_list),
         init_checkpoint=FLAGS.init_checkpoint,
-        learning_rate=FLAGS.learning_rate if not FLAGS.horovod else FLAGS.learning_rate*hvd.size(),
+        learning_rate=FLAGS.learning_rate if not FLAGS.horovod else FLAGS.learning_rate * hvd.size(),
         num_train_steps=num_train_steps,
         num_warmup_steps=num_warmup_steps,
         use_tpu=FLAGS.use_tpu,
         use_one_hot_embeddings=FLAGS.use_tpu,
-        hvd=None if not FLAGS.horovod else hvd)
+        hvd=None if not FLAGS.horovod else hvd)  # type: tf.contrib.tpu.TPUEstimatorSpec
 
     # If TPU is not available, this will fall back to normal Estimator on CPU
     # or GPU.
@@ -989,6 +1211,11 @@ def main(_):
         eval_batch_size=FLAGS.eval_batch_size,
         predict_batch_size=FLAGS.predict_batch_size)
 
+    hooks = []
+    if FLAGS.debug:
+        from tensorflow.python import debug as tf_debug
+        hooks = [tf_debug.LocalCLIDebugHook()]
+
     if FLAGS.do_train:
         train_file = os.path.join(FLAGS.output_dir, "train.tf_record")
         file_based_convert_examples_to_features(
@@ -999,15 +1226,23 @@ def main(_):
         tf.logging.info("  Num steps = %d", num_train_steps)
 
         training_hooks = []
+        training_hooks.extend(hooks)
         if FLAGS.horovod and hvd.size() > 1:
             training_hooks.append(hvd.BroadcastGlobalVariablesHook(0))
+
+        # if FLAGS.report_loss:
+        #     global_batch_size = FLAGS.train_batch_size if not FLAGS.horovod else FLAGS.train_batch_size * hvd.size()
+        #     training_hooks.append(
+        #         _LogSessionRunHook(global_batch_size, FLAGS.report_loss_iters,
+        #                            -1 if not FLAGS.horovod else hvd.rank()))
 
         train_input_fn = file_based_input_fn_builder(
             input_file=train_file,
             seq_length=FLAGS.max_seq_length,
             is_training=True,
-            drop_remainder=True,
-            hvd=None if not FLAGS.horovod else hvd)
+            drop_remainder=True)
+
+        tf.logging.set_verbosity(tf.logging.INFO)
         estimator.train(input_fn=train_input_fn, hooks=training_hooks, max_steps=num_train_steps)
 
     if FLAGS.do_eval and (not FLAGS.horovod or hvd.rank() == 0):
@@ -1045,10 +1280,9 @@ def main(_):
             input_file=eval_file,
             seq_length=FLAGS.max_seq_length,
             is_training=False,
-            drop_remainder=eval_drop_remainder,
-            hvd=None if not FLAGS.horovod else hvd)
+            drop_remainder=eval_drop_remainder)
 
-        result = estimator.evaluate(input_fn=eval_input_fn, steps=eval_steps)
+        result = estimator.evaluate(input_fn=eval_input_fn, steps=eval_steps, hooks=hooks)
 
         output_eval_file = os.path.join(FLAGS.output_dir, "eval_results.txt")
         with tf.gfile.GFile(output_eval_file, "w") as writer:
@@ -1057,7 +1291,53 @@ def main(_):
                 tf.logging.info("  %s = %s", key, str(result[key]))
                 writer.write("%s = %s\n" % (key, str(result[key])))
 
-    if FLAGS.do_predict:
+    if FLAGS.do_test and (not FLAGS.horovod or hvd.rank() == 0):
+        test_examples = processor.get_test_examples(FLAGS.data_dir)
+        num_actual_test_examples = len(test_examples)
+        if FLAGS.use_tpu:
+            # TPU requires a fixed batch size for all batches, therefore the number
+            # of examples must be a multiple of the batch size, or else examples
+            # will get dropped. So we pad with fake examples which are ignored
+            # later on. These do NOT count towards the metric (all tf.metrics
+            # support a per-instance weight, and these get a weight of 0.0).
+            while len(test_examples) % FLAGS.eval_batch_size != 0:
+                test_examples.append(PaddingInputExample())
+
+        test_file = os.path.join(FLAGS.output_dir, "test.tf_record")
+        file_based_convert_examples_to_features(
+            test_examples, label_list, FLAGS.max_seq_length, tokenizer, test_file)
+
+        tf.logging.info("***** Running evaluation *****")
+        tf.logging.info("  Num examples = %d (%d actual, %d padding)",
+                        len(test_examples), num_actual_test_examples,
+                        len(test_examples) - num_actual_test_examples)
+        tf.logging.info("  Batch size = %d", FLAGS.test_batch_size)
+
+        # This tells the estimator to run through the entire set.
+        test_steps = None
+        # However, if running eval on the TPU, you will need to specify the
+        # number of steps.
+        if FLAGS.use_tpu:
+            assert len(test_examples) % FLAGS.eval_batch_size == 0
+            test_steps = int(len(test_examples) // FLAGS.test_batch_size)
+
+        test_drop_remainder = True if FLAGS.use_tpu else False
+        test_input_fn = file_based_input_fn_builder(
+            input_file=test_file,
+            seq_length=FLAGS.max_seq_length,
+            is_training=False,
+            drop_remainder=test_drop_remainder)
+
+        result = estimator.evaluate(input_fn=test_input_fn, steps=test_steps, hooks=hooks)
+
+        output_test_file = os.path.join(FLAGS.output_dir, "test_results.txt")
+        with tf.gfile.GFile(output_test_file, "w") as writer:
+            tf.logging.info("***** Test results *****")
+            for key in sorted(result.keys()):
+                tf.logging.info("  %s = %s", key, str(result[key]))
+                writer.write("%s = %s\n" % (key, str(result[key])))
+
+    if FLAGS.do_predict and (not FLAGS.horovod or hvd.rank() == 0):
         predict_examples = processor.get_test_examples(FLAGS.data_dir)
         num_actual_predict_examples = len(predict_examples)
         if FLAGS.use_tpu:
@@ -1086,22 +1366,38 @@ def main(_):
             is_training=False,
             drop_remainder=predict_drop_remainder)
 
-        result = estimator.predict(input_fn=predict_input_fn)
+        _predict(estimator, predict_input_fn, hooks,
+                 "test_results.tsv", num_actual_predict_examples, "***** Test Predict results *****")
 
-        output_predict_file = os.path.join(FLAGS.output_dir, "test_results.tsv")
-        with tf.gfile.GFile(output_predict_file, "w") as writer:
-            num_written_lines = 0
-            tf.logging.info("***** Predict results *****")
-            for (i, prediction) in enumerate(result):
-                probabilities = prediction["probabilities"]
-                if i >= num_actual_predict_examples:
-                    break
-                output_line = "\t".join(
-                    str(class_probability)
-                    for class_probability in probabilities) + "\n"
-                writer.write(output_line)
-                num_written_lines += 1
-        assert num_written_lines == num_actual_predict_examples
+
+def _evaluate(estimator, input_fn, hooks, eval_steps, output_eval_file, header="***** Evaluation Results *****"):
+    result = estimator.evaluate(input_fn=input_fn, steps=eval_steps, hooks=hooks)
+
+    output_test_file = os.path.join(FLAGS.output_dir, output_eval_file)
+    with tf.gfile.GFile(output_test_file, "w") as writer:
+        tf.logging.info(header)
+        for key in sorted(result.keys()):
+            tf.logging.info("  %s = %s", key, str(result[key]))
+            writer.write("%s = %s\n" % (key, str(result[key])))
+
+
+def _predict(estimator, input_fn, hooks, output_predict_file, num_actual_predict_examples, header="***** Predict results *****"):
+    result = estimator.predict(input_fn=input_fn, hooks=hooks)
+
+    output_predict_file = os.path.join(FLAGS.output_dir, output_predict_file)
+    with tf.gfile.GFile(output_predict_file, "w") as writer:
+        num_written_lines = 0
+        tf.logging.info(header)
+        for (i, prediction) in enumerate(result):
+            probabilities = prediction["probabilities"]
+            if i >= num_actual_predict_examples:
+                break
+            output_line = "\t".join(
+                str(class_probability)
+                for class_probability in probabilities) + "\n"
+            writer.write(output_line)
+            num_written_lines += 1
+    assert num_written_lines == num_actual_predict_examples
 
 
 if __name__ == "__main__":

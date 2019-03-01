@@ -143,6 +143,22 @@ flags.DEFINE_bool("allow_masked_entities", False, "Whether to allow entities to 
 flags.DEFINE_enum("composition_method", "linear", ["linear", "RAN", "TRAN"],
                   "How to compose token embeddings for oscar loss.")
 
+flags.DEFINE_enum("oscar_regularization", "mean", ["sum", "mean"],
+                  "How to aggregate oscar regularization loss.")
+
+flags.DEFINE_enum("oscar_distance", "l2", ["euclidean", "l1", "l2", "cosine"],
+                  "How to measure distance between compositional and pre-trained entity embeddings.")
+
+flags.DEFINE_float("oscar_smoothing", 0.3, "Factor applied to smooth Oscar regularization")
+
+
+distance_metrics = {
+    "cosine": lambda composed, pretrained:  1 - tf.reduce_sum(tf.multiply(composed, pretrained), axis=-1),
+    "euclidean": lambda composed, pretrained: tf.norm(composed - pretrained, ord='euclidean'),
+    "l1": lambda composed, pretrained: tf.norm(composed - pretrained, ord=1),
+    "l2": lambda composed, pretrained: tf.norm(composed - pretrained, ord=2),
+}
+
 
 # report samples/sec, total loss and learning rate during training
 # noinspection PyAttributeOutsideInit
@@ -173,10 +189,10 @@ class _LogSessionRunHook(tf.train.SessionRunHook):
             dt = self.elapsed_secs / self.count
             img_per_sec = self.global_batch_size / dt
             if self.hvd_rank >= 0:
-                print('%2d :: %6i %11.1f %10.4g %10.4g %10.4g %6.3f     %6.4e' %
+                print('%2d :: %6i %11.1f %10.4g %10.4g %10.4g %10.4g     %6.4e' %
                       (self.hvd_rank, print_step, img_per_sec, mlm_loss, nsp_loss, osc_loss, total_loss, lr))
             else:
-                print('%6i %11.1f %10.4g %10.4g %10.4g %6.3f     %6.4e' %
+                print('%6i %11.1f %10.4g %10.4g %10.4g %10.4g     %6.4e' %
                       (print_step, img_per_sec, mlm_loss, nsp_loss, osc_loss, total_loss, lr))
             self.elapsed_secs = 0.
             self.count = 0
@@ -240,7 +256,7 @@ def model_fn_builder(oscar_config, init_checkpoint, learning_rate,
         next_sentence_loss = tf.identity(next_sentence_loss, "nsp_loss")
         entity_loss = tf.identity(entity_loss, "osc_loss")
 
-        total_loss = masked_lm_loss + next_sentence_loss + entity_loss
+        total_loss = masked_lm_loss + next_sentence_loss + FLAGS.oscar_smoothing * entity_loss
         total_loss = tf.identity(total_loss, name='total_loss')
 
         tvars = tf.trainable_variables()
@@ -489,12 +505,19 @@ def get_oscar_loss(oscar_config,
 
         with tf.variable_scope('loss'):
             composed_entities = tf.reshape(composed_entities, [batch_size, max_entities, entity_width])
-            difference = tf.norm(embedded_entities - tf.cast(composed_entities, tf.float32), ord=oscar_config.norm_ord)
+            composed_entities = tf.cast(composed_entities, tf.float32)
+            difference = distance_metrics[FLAGS.oscar_distance](composed_entities, embedded_entities)
             mask = tf.to_float(tf.minimum(entity_lengths, 1))
             # If we have no entities, we set num_entities = 1 to avoid division by zero
             num_entities = tf.maximum(tf.reduce_sum(mask, axis=-1), 1)
             # 1/2 * average l2 difference
-            example_loss = tf.reduce_sum(difference * mask, axis=-1) / (2 * num_entities)
+            if FLAGS.oscar_regularization.lower() == 'mean':
+                example_loss = tf.reduce_sum(difference * mask, axis=-1) / (2 * num_entities)
+            elif FLAGS.oscar_regularization.lower() == 'sum':
+                example_loss = tf.reduce_sum(difference * mask, axis=-1) * .5
+            else:
+                raise NotImplementedError("Unsupported regularization method %s", FLAGS.oscar_regularization)
+
             loss = tf.reduce_mean(example_loss, axis=-1)
 
             return loss, example_loss
