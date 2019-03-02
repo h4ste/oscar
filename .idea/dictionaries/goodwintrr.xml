@@ -1,11 +1,17 @@
 <component name="ProjectDictionaryState">
   <dictionary name="goodwintrr">
     <words>
+      <w>aupr</w>
+      <w>auroc</w>
       <w>gvars</w>
       <w>logits</w>
+      <w>mnli</w>
+      <w>pretrained</w>
       <w>probs</w>
       <w>pylint</w>
       <w>tvars</w>
+      <w>warmup</w>
+      <w>xnli</w>
     </words>
   </dictionary>
 </component>

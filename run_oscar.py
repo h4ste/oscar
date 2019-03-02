@@ -163,6 +163,7 @@ def angular_cosine_distance(composed, pretrained):
     tf.logging.info("Cosine::pretrained_norm:%s", pretrained_norm)
     cosine_similarity = tf.reduce_sum(tf.multiply(composed_norm, pretrained_norm), axis=-1)
     tf.logging.info("Cosine::cosine_similarity:%s", cosine_similarity)
+    cosine_similarity = tf.minimum(tf.maximum(cosine_similarity, -1), 1)
     angular_distance = tf.acos(cosine_similarity) / math.pi
     tf.logging.info("Cosine::angular_distance:%s", angular_distance)
     return angular_distance
@@ -173,12 +174,12 @@ def angular_cosine_distance(composed, pretrained):
 
 @function.Defun(tf.float32, tf.float32)
 def l1_norm_grad(x, dy):
-    return dy*(x/(tf.norm(x, ord=1)+1.0e-19))
+    return dy*(x/(tf.norm(x, ord=1) + 1.0e-12))
 
 
 @function.Defun(tf.float32, tf.float32)
 def l2_norm_grad(x, dy):
-    return dy*(x/(tf.norm(x, ord=2)+1.0e-19))
+    return dy*(x/(tf.norm(x, ord=2) + 1.0e-12))
 
 
 @function.Defun(tf.float32, grad_func=l1_norm_grad)
@@ -546,7 +547,7 @@ def get_oscar_loss(oscar_config,
             composed_entities = tf.nn.bias_add(tf.matmul(composed_entities, proj_weights), proj_bias)
 
         with tf.variable_scope('loss'):
-            composed_entities = tf.reshape(composed_entities, [batch_size * max_entities, entity_width])
+            # composed_entities = tf.reshape(composed_entities, [batch_size * max_entities, entity_width])
             composed_entities = tf.cast(composed_entities, tf.float32)
             embedded_entities = tf.reshape(embedded_entities, [batch_size * max_entities, entity_width])
             difference = distance_metrics[FLAGS.oscar_distance](composed_entities, embedded_entities)
