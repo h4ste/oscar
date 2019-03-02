@@ -155,10 +155,16 @@ flags.DEFINE_float("oscar_smoothing", 1., "Factor applied to smooth Oscar regula
 
 
 def angular_cosine_distance(composed, pretrained):
-    composed_norm = batch_norm(composed, l2_norm)
-    pretrained_norm = batch_norm(pretrained, l1_norm)
+    tf.logging.info("Cosine::composed:%s", composed)
+    tf.logging.info("Cosine::pretrained:%s", pretrained)
+    composed_norm = tf.nn.l2_normalize(composed, axis=-1)
+    tf.logging.info("Cosine::composed_norm:%s", composed_norm)
+    pretrained_norm = tf.nn.l2_normalize(pretrained, axis=-1)
+    tf.logging.info("Cosine::pretrained_norm:%s", pretrained_norm)
     cosine_similarity = tf.reduce_sum(tf.multiply(composed_norm, pretrained_norm), axis=-1)
+    tf.logging.info("Cosine::cosine_similarity:%s", cosine_similarity)
     angular_distance = tf.acos(cosine_similarity) / math.pi
+    tf.logging.info("Cosine::angular_distance:%s", angular_distance)
     return angular_distance
 
 
@@ -191,8 +197,8 @@ def batch_norm(x, norm_fn):
 
 distance_metrics = {
     "cosine": angular_cosine_distance,
-    "l1": lambda composed, pretrained, axis=None: batch_norm(composed - pretrained, l1_norm),
-    "l2": lambda composed, pretrained, axis=None: batch_norm(composed - pretrained, l2_norm),
+    "l1": lambda composed, pretrained: batch_norm(composed - pretrained, l1_norm),
+    "l2": lambda composed, pretrained: batch_norm(composed - pretrained, l2_norm),
 }
 
 
@@ -540,9 +546,11 @@ def get_oscar_loss(oscar_config,
             composed_entities = tf.nn.bias_add(tf.matmul(composed_entities, proj_weights), proj_bias)
 
         with tf.variable_scope('loss'):
-            composed_entities = tf.reshape(composed_entities, [batch_size, max_entities, entity_width])
+            composed_entities = tf.reshape(composed_entities, [batch_size * max_entities, entity_width])
             composed_entities = tf.cast(composed_entities, tf.float32)
+            embedded_entities = tf.reshape(embedded_entities, [batch_size * max_entities, entity_width])
             difference = distance_metrics[FLAGS.oscar_distance](composed_entities, embedded_entities)
+            difference = tf.reshape(difference, [batch_size, max_entities])
             mask = tf.to_float(tf.minimum(entity_lengths, 1))
             # If we have no entities, we set num_entities = 1 to avoid division by zero
             num_entities = tf.maximum(tf.reduce_sum(mask, axis=-1), 1)
