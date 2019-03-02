@@ -20,6 +20,7 @@ from __future__ import print_function
 
 import os
 import time
+import math
 
 import numpy as np
 import tensorflow as tf
@@ -147,20 +148,22 @@ flags.DEFINE_enum("composition_method", "linear", ["linear", "RAN", "TRAN"],
 flags.DEFINE_enum("oscar_regularization", "mean", ["sum", "mean"],
                   "How to aggregate oscar regularization loss.")
 
-flags.DEFINE_enum("oscar_distance", "l2", ["euclidean", "l1", "l2", "cosine"],
+flags.DEFINE_enum("oscar_distance", "l2", ["l1", "l2", "cosine"],
                   "How to measure distance between compositional and pre-trained entity embeddings.")
 
 flags.DEFINE_float("oscar_smoothing", 0.3, "Factor applied to smooth Oscar regularization")
 
 
-distance_metrics = {
-    "cosine": lambda composed, pretrained:  1 - tf.reduce_sum(tf.multiply(composed, pretrained), axis=-1),
-    "euclidean": lambda composed, pretrained: euclidean_norm(composed - pretrained),
-    "l1": lambda composed, pretrained: l1_norm(composed - pretrained),
-    "l2": lambda composed, pretrained: l2_norm(composed - pretrained),
-}
+def angular_cosine_distance(composed, pretrained):
+    composed_norm = batch_norm(composed, l2_norm)
+    pretrained_norm = batch_norm(pretrained, l1_norm)
+    cosine_similarity = tf.reduce_sum(tf.multiply(composed_norm, pretrained_norm), axis=-1)
+    angular_distance = tf.acos(cosine_similarity) / math.pi
+    return angular_distance
+
 
 # Numerically stable norm calculation from https://github.com/tensorflow/tensorflow/issues/12071
+
 
 @function.Defun(tf.float32, tf.float32)
 def l1_norm_grad(x, dy):
@@ -170,11 +173,6 @@ def l1_norm_grad(x, dy):
 @function.Defun(tf.float32, tf.float32)
 def l2_norm_grad(x, dy):
     return dy*(x/(tf.norm(x, ord=2)+1.0e-19))
-
-
-@function.Defun(tf.float32, tf.float32)
-def euclidean_norm_grad(x, dy):
-    return dy*(x/(tf.norm(x, ord='euclidean')+1.0e-19))
 
 
 @function.Defun(tf.float32, grad_func=l1_norm_grad)
@@ -187,19 +185,15 @@ def l2_norm(x):
     return tf.norm(x, ord=2)
 
 
-@function.Defun(tf.float32, grad_func=euclidean_norm_grad)
-def euclidean_norm(x):
-    return tf.norm(x, ord='euclidean')
+def batch_norm(x, norm_fn):
+    return tf.map_fn(norm_fn, x)
 
 
-@function.Defun(tf.float32, tf.float32)
-def norm_grad(x, dy):
-    return dy*(x/(tf.norm(x, ord=2)+1.0e-19))
-
-
-@function.Defun(tf.float32, grad_func=norm_grad)
-def norm(x):
-    return tf.norm(x, ord=2)
+distance_metrics = {
+    "cosine": angular_cosine_distance,
+    "l1": lambda composed, pretrained, axis=None: batch_norm(composed - pretrained, l1_norm),
+    "l2": lambda composed, pretrained, axis=None: batch_norm(composed - pretrained, l2_norm),
+}
 
 
 # report samples/sec, total loss and learning rate during training
@@ -548,7 +542,7 @@ def get_oscar_loss(oscar_config,
         with tf.variable_scope('loss'):
             composed_entities = tf.reshape(composed_entities, [batch_size, max_entities, entity_width])
             composed_entities = tf.cast(composed_entities, tf.float32)
-            difference = distance_metrics[FLAGS.oscar_distance](composed_entities, embedded_entities)
+            difference = distance_metrics[FLAGS.oscar_distance](composed_entities, embedded_entities, axis=-1)
             mask = tf.to_float(tf.minimum(entity_lengths, 1))
             # If we have no entities, we set num_entities = 1 to avoid division by zero
             num_entities = tf.maximum(tf.reduce_sum(mask, axis=-1), 1)
