@@ -23,6 +23,7 @@ import time
 
 import numpy as np
 import tensorflow as tf
+from tensorflow.python.framework import function
 
 import gpu_environment
 import modeling
@@ -154,10 +155,51 @@ flags.DEFINE_float("oscar_smoothing", 0.3, "Factor applied to smooth Oscar regul
 
 distance_metrics = {
     "cosine": lambda composed, pretrained:  1 - tf.reduce_sum(tf.multiply(composed, pretrained), axis=-1),
-    "euclidean": lambda composed, pretrained: tf.norm(composed - pretrained, ord='euclidean'),
-    "l1": lambda composed, pretrained: tf.norm(composed - pretrained, ord=1),
-    "l2": lambda composed, pretrained: tf.norm(composed - pretrained, ord=2),
+    "euclidean": lambda composed, pretrained: euclidean_norm(composed - pretrained),
+    "l1": lambda composed, pretrained: l1_norm(composed - pretrained),
+    "l2": lambda composed, pretrained: l2_norm(composed - pretrained),
 }
+
+# Numerically stable norm calculation from https://github.com/tensorflow/tensorflow/issues/12071
+
+@function.Defun(tf.float32, tf.float32)
+def l1_norm_grad(x, dy):
+    return dy*(x/(tf.norm(x, ord=1)+1.0e-19))
+
+
+@function.Defun(tf.float32, tf.float32)
+def l2_norm_grad(x, dy):
+    return dy*(x/(tf.norm(x, ord=2)+1.0e-19))
+
+
+@function.Defun(tf.float32, tf.float32)
+def euclidean_norm_grad(x, dy):
+    return dy*(x/(tf.norm(x, ord='euclidean')+1.0e-19))
+
+
+@function.Defun(tf.float32, grad_func=l1_norm_grad)
+def l1_norm(x):
+    return tf.norm(x, ord=1)
+
+
+@function.Defun(tf.float32, grad_func=l2_norm_grad)
+def l2_norm(x):
+    return tf.norm(x, ord=2)
+
+
+@function.Defun(tf.float32, grad_func=euclidean_norm_grad)
+def euclidean_norm(x):
+    return tf.norm(x, ord='euclidean')
+
+
+@function.Defun(tf.float32, tf.float32)
+def norm_grad(x, dy):
+    return dy*(x/(tf.norm(x, ord=2)+1.0e-19))
+
+
+@function.Defun(tf.float32, grad_func=norm_grad)
+def norm(x):
+    return tf.norm(x, ord=2)
 
 
 # report samples/sec, total loss and learning rate during training
