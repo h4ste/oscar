@@ -151,7 +151,7 @@ flags.DEFINE_enum("oscar_regularization", "mean", ["sum", "mean"],
 flags.DEFINE_enum("oscar_distance", "l2", ["l1", "l2", "cosine"],
                   "How to measure distance between compositional and pre-trained entity embeddings.")
 
-flags.DEFINE_float("oscar_smoothing", 0.3, "Factor applied to smooth Oscar regularization")
+flags.DEFINE_float("oscar_smoothing", 1., "Factor applied to smooth Oscar regularization")
 
 
 def angular_cosine_distance(composed, pretrained):
@@ -290,9 +290,9 @@ def model_fn_builder(oscar_config, init_checkpoint, learning_rate,
 
         masked_lm_loss = tf.identity(masked_lm_loss, "mlm_loss")
         next_sentence_loss = tf.identity(next_sentence_loss, "nsp_loss")
-        entity_loss = tf.identity(entity_loss, "osc_loss")
+        entity_loss = tf.identity(FLAGS.oscar_smoothing * entity_loss, "osc_loss")
 
-        total_loss = masked_lm_loss + next_sentence_loss + FLAGS.oscar_smoothing * entity_loss
+        total_loss = masked_lm_loss + next_sentence_loss + entity_loss
         total_loss = tf.identity(total_loss, name='total_loss')
 
         tvars = tf.trainable_variables()
@@ -542,7 +542,7 @@ def get_oscar_loss(oscar_config,
         with tf.variable_scope('loss'):
             composed_entities = tf.reshape(composed_entities, [batch_size, max_entities, entity_width])
             composed_entities = tf.cast(composed_entities, tf.float32)
-            difference = distance_metrics[FLAGS.oscar_distance](composed_entities, embedded_entities, axis=-1)
+            difference = distance_metrics[FLAGS.oscar_distance](composed_entities, embedded_entities)
             mask = tf.to_float(tf.minimum(entity_lengths, 1))
             # If we have no entities, we set num_entities = 1 to avoid division by zero
             num_entities = tf.maximum(tf.reduce_sum(mask, axis=-1), 1)
