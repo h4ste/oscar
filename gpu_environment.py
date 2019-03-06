@@ -16,6 +16,7 @@
 import tensorflow as tf
 import numpy as np
 
+
 def float32_variable_storage_getter(getter, name, shape=None, dtype=None,
                                     initializer=None, regularizer=None,
                                     trainable=True,
@@ -31,6 +32,7 @@ def float32_variable_storage_getter(getter, name, shape=None, dtype=None,
     if trainable and dtype != tf.float32:
         variable = tf.cast(variable, dtype)
     return variable
+
 
 def get_custom_getter(compute_type):
     return float32_variable_storage_getter if compute_type == tf.float16 else None
