@@ -548,20 +548,10 @@ class RqeProcessor(DataProcessor):
         return self._create_examples(os.path.join(data_dir, 'RQE_Train_8588_AMIA2016.xml'), 'train')
 
     def get_test_examples(self, data_dir):
-        return self._create_examples(os.path.join(data_dir, 'RQE_Test_302_pairs_AMIA2016.xml'), 'dev')
+        return self._create_examples(os.path.join(data_dir, 'MEDIQA_Task2_RQE_TestSet.xml'), 'test')
 
     def get_dev_examples(self, data_dir):
-        examples = []
-        with tf.gfile.Open(os.path.join(data_dir, 'test_850_CHQs.txt'), 'r') as file:
-            for (i, line) in enumerate(file):
-                fields = line.rstrip('\n').split('|||')
-                chq = tokenization.convert_to_unicode(fields[0])
-                faq = tokenization.convert_to_unicode(fields[1])
-                answer = fields[2]
-
-                ex = InputExample(guid='%s-%d' % ('test', i + 1), text_a=chq, text_b=faq, label=answer)
-                examples.append(ex)
-            return examples
+        return self._create_examples(os.path.join(data_dir, 'MEDIQA-2019-RQE-Val-Set-Final.xml'), 'dev')
 
     def get_labels(self):
         """See base class."""
@@ -586,6 +576,38 @@ class RqeProcessor(DataProcessor):
             ex = InputExample(guid='%s-%d' % (set_type, id_), text_a=chq, text_b=faq, label=answer)
             examples.append(ex)
 
+        return examples
+
+
+class MedNliProcessor(DataProcessor):
+
+    def get_train_examples(self, data_dir):
+        return self._create_examples(os.path.join(data_dir, 'mli_train_v1.jsonl'), 'train')
+
+    def get_test_examples(self, data_dir):
+        return self._create_examples(os.path.join(data_dir, 'mli_test_v1.jsonl'), 'test')
+
+    def get_dev_examples(self, data_dir):
+        return self._create_examples(os.path.join(data_dir, 'mli_dev_v1.jsonl'), 'dev')
+
+    def get_labels(self):
+        """See base class."""
+        return ['contradiction', 'entailment', 'neutral']
+
+    # noinspection PyMethodMayBeStatic
+    def _create_examples(self, jsonl_file, set_type):
+        import json
+
+        examples = []
+        with open(jsonl_file, 'r') as jsonl:
+            for line in jsonl:
+                data = json.loads(line)
+                text_a = data['sentence1']
+                text_b = data['sentence2']
+                label = data['gold_label']
+                id = data['pairID']
+                ex = InputExample(guid='%s-%s' % (set_type, id), text_a=text_a, text_b=text_b, label=label)
+                examples.append(ex)
         return examples
 
 
