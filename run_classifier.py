@@ -605,8 +605,8 @@ class MedNliProcessor(DataProcessor):
                 text_a = data['sentence1']
                 text_b = data['sentence2']
                 label = data['gold_label']
-                id = data['pairID']
-                ex = InputExample(guid='%s-%s' % (set_type, id), text_a=text_a, text_b=text_b, label=label)
+                id_ = data['pairID']
+                ex = InputExample(guid='%s-%s' % (set_type, id_), text_a=text_a, text_b=text_b, label=label)
                 examples.append(ex)
         return examples
 
@@ -1008,10 +1008,10 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
                     loss_ = tf.metrics.mean(values=per_example_loss_, weights=is_real_example_)
 
                     precision_ = tf.metrics.precision(labels=label_ids_, predictions=predictions_,
-                                                     weights=is_real_example_)
+                                                      weights=is_real_example_)
                     recall_ = tf.metrics.recall(labels=label_ids_, predictions=predictions_, weights=is_real_example_)
                     f1_ = tf.contrib.metrics.f1_score(labels=label_ids, predictions=predictions_,
-                                                     weights=is_real_example_)
+                                                      weights=is_real_example_)
 
                     # noinspection PyPackageRequirements,PyPackageRequirements
                     from tensorboard import summary as summary_lib
@@ -1403,7 +1403,8 @@ def _evaluate(estimator, input_fn, hooks, eval_steps, output_eval_file, header="
             writer.write("%s = %s\n" % (key, str(result[key])))
 
 
-def _predict(estimator, input_fn, hooks, output_predict_file, num_actual_predict_examples, header="***** Predict results *****"):
+def _predict(estimator, input_fn, hooks, output_predict_file, num_actual_predict_examples,
+             header="***** Predict results *****"):
     result = estimator.predict(input_fn=input_fn, hooks=hooks)
 
     output_predict_file = os.path.join(FLAGS.output_dir, output_predict_file)

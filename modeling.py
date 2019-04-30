@@ -21,9 +21,9 @@ from __future__ import print_function
 import collections
 import copy
 import json
-import math
 import re
 
+import math
 import numpy as np
 import six
 import tensorflow as tf
@@ -321,7 +321,6 @@ def get_activation(activation_string):
 
 def get_assignment_map_from_checkpoint(tvars, init_checkpoint):
     """Compute the union of the current variables and checkpoint variables."""
-    assignment_map = {}
     initialized_variable_names = {}
 
     name_to_variable = collections.OrderedDict()
@@ -343,7 +342,7 @@ def get_assignment_map_from_checkpoint(tvars, init_checkpoint):
         initialized_variable_names[name] = 1
         initialized_variable_names[name + ":0"] = 1
 
-    return (assignment_map, initialized_variable_names)
+    return assignment_map, initialized_variable_names
 
 
 def dropout(input_tensor, dropout_prob):
@@ -427,7 +426,7 @@ def embedding_lookup(input_ids,
 
     output = tf.reshape(output,
                         input_shape[0:-1] + [input_shape[-1] * embedding_size])
-    return (output, embedding_table)
+    return output, embedding_table
 
 
 def embedding_postprocessor(input_tensor,
@@ -621,6 +620,7 @@ def attention_layer(from_tensor,
         of the 3D version of the `from_tensor`.
       to_seq_length: (Optional) If the input is 2D, this might be the seq length
         of the 3D version of the `to_tensor`.
+      compute_type: (Optional) type of floating points to use during computation (mixed precision).
 
     Returns:
       float Tensor of shape [batch_size, from_seq_length,
@@ -632,10 +632,10 @@ def attention_layer(from_tensor,
       ValueError: Any of the arguments or tensor shapes are invalid.
     """
 
-    def transpose_for_scores(input_tensor, batch_size, num_attention_heads,
+    def transpose_for_scores(input_tensor, batch_size_, num_attention_heads_,
                              seq_length, width):
         output_tensor = tf.reshape(
-            input_tensor, [batch_size, seq_length, num_attention_heads, width])
+            input_tensor, [batch_size_, seq_length, num_attention_heads_, width])
 
         output_tensor = tf.transpose(output_tensor, [0, 2, 1, 3])
         return output_tensor
@@ -652,7 +652,7 @@ def attention_layer(from_tensor,
         from_seq_length = from_shape[1]
         to_seq_length = to_shape[1]
     elif len(from_shape) == 2:
-        if (batch_size is None or from_seq_length is None or to_seq_length is None):
+        if batch_size is None or from_seq_length is None or to_seq_length is None:
             raise ValueError(
                 "When passing in rank 2 tensors to attention_layer, the values "
                 "for `batch_size`, `from_seq_length`, and `to_seq_length` "
@@ -806,6 +806,7 @@ def transformer_model(input_tensor,
         normal).
       do_return_all_layers: Whether to also return all layers or just the final
         layer.
+      compute_type: Type of floating points to use during training (mixed precision)
 
     Returns:
       float Tensor of shape [batch_size, seq_length, hidden_size], the final
@@ -860,7 +861,6 @@ def transformer_model(input_tensor,
                         compute_type=compute_type)
                     attention_heads.append(attention_head)
 
-                attention_output = None
                 if len(attention_heads) == 1:
                     attention_output = attention_heads[0]
                 else:
@@ -950,7 +950,7 @@ def reshape_to_matrix(input_tensor):
     ndims = input_tensor.shape.ndims
     if ndims < 2:
         raise ValueError("Input tensor must have at least rank 2. Shape = %s" %
-                         (input_tensor.shape))
+                         input_tensor.shape)
     if ndims == 2:
         return input_tensor
 

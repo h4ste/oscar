@@ -20,8 +20,8 @@ from __future__ import print_function
 
 import os
 import time
-import math
 
+import math
 import numpy as np
 import tensorflow as tf
 from tensorflow.python.framework import function
@@ -174,12 +174,12 @@ def angular_cosine_distance(composed, pretrained):
 
 @function.Defun(tf.float32, tf.float32)
 def l1_norm_grad(x, dy):
-    return dy*(x/(tf.norm(x, ord=1) + 1.0e-12))
+    return dy * (x / (tf.norm(x, ord=1) + 1.0e-12))
 
 
 @function.Defun(tf.float32, tf.float32)
 def l2_norm_grad(x, dy):
-    return dy*(x/(tf.norm(x, ord=2) + 1.0e-12))
+    return dy * (x / (tf.norm(x, ord=2) + 1.0e-12))
 
 
 @function.Defun(tf.float32, grad_func=l1_norm_grad)

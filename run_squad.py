@@ -20,10 +20,11 @@ from __future__ import print_function
 
 import collections
 import json
-import math
 import os
 import random
 import time
+
+import math
 import six
 import tensorflow as tf
 
@@ -1127,9 +1128,9 @@ class FeatureWriter(object):
         self.num_features += 1
 
         def create_int_feature(values):
-            feature = tf.train.Feature(
+            feature_ = tf.train.Feature(
                 int64_list=tf.train.Int64List(value=list(values)))
-            return feature
+            return feature_
 
         features = collections.OrderedDict()
         features["unique_ids"] = create_int_feature([feature.unique_id])

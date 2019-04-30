@@ -262,11 +262,11 @@ def load_numberbatch(entity_embedding_path):
 
 
 def find_entities(inputs, entity_trie):
-    L = len(inputs)
+    len_ = len(inputs)
     matches = []
-    for i in range(L):
+    for i in range(len_):
         node = entity_trie
-        for j in range(i, L):
+        for j in range(i, len_):
             node = node.children.get(inputs[j])
             if not node:
                 break
@@ -276,12 +276,12 @@ def find_entities(inputs, entity_trie):
 
 
 def find_longest_entities(inputs, entity_trie):
-    L = len(inputs)
+    len_ = len(inputs)
     matches = []
     seen_ends = set()
-    for i in range(L):
+    for i in range(len_):
         node = entity_trie
-        for j in range(i, L):
+        for j in range(i, len_):
             child = node.children.get(inputs[j])
             if not child:
                 if j not in seen_ends:

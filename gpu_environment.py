@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import tensorflow as tf
-import numpy as np
 
 
 def float32_variable_storage_getter(getter, name, shape=None, dtype=None,

@@ -30,7 +30,7 @@ flags = tf.flags
 
 FLAGS = flags.FLAGS
 
-## Required parameters
+# Required parameters
 flags.DEFINE_string(
     "bert_config_file", None,
     "The config json file corresponding to the pre-trained BERT model. "
@@ -44,7 +44,7 @@ flags.DEFINE_string(
     "output_dir", None,
     "The output directory where the model checkpoints will be written.")
 
-## Other parameters
+# Other parameters
 flags.DEFINE_string(
     "init_checkpoint", None,
     "Initial checkpoint (usually from a pre-trained BERT model).")
@@ -162,6 +162,8 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
 
     def model_fn(features, labels, mode, params):  # pylint: disable=unused-argument
         """The `model_fn` for TPUEstimator."""
+        del labels
+        del params
 
         tf.logging.info("*** Features ***")
         for name in sorted(features.keys()):
@@ -225,7 +227,6 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
             tf.logging.info("  %d :: name = %s, shape = %s%s", 0 if hvd is None else hvd.rank(), var.name, var.shape,
                             init_string)
 
-        output_spec = None
         if mode == tf.estimator.ModeKeys.TRAIN:
             train_op = optimization.create_optimizer(
                 total_loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu,
@@ -238,6 +239,7 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
                 scaffold_fn=scaffold_fn)
         elif mode == tf.estimator.ModeKeys.EVAL:
 
+            # noinspection PyShadowingNames
             def metric_fn(masked_lm_example_loss, masked_lm_log_probs, masked_lm_ids,
                           masked_lm_weights, next_sentence_example_loss,
                           next_sentence_log_probs, next_sentence_labels):
@@ -284,7 +286,7 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
                 eval_metrics=eval_metrics,
                 scaffold_fn=scaffold_fn)
         else:
-            raise ValueError("Only TRAIN and EVAL modes are supported: %s" % (mode))
+            raise ValueError("Only TRAIN and EVAL modes are supported: %s" % mode)
 
         return output_spec
 
@@ -333,7 +335,7 @@ def get_masked_lm_output(bert_config, input_tensor, output_weights, positions,
         denominator = tf.reduce_sum(label_weights) + 1e-5
         loss = numerator / denominator
 
-    return (loss, per_example_loss, log_probs)
+    return loss, per_example_loss, log_probs
 
 
 def get_next_sentence_output(bert_config, input_tensor, labels):
@@ -356,7 +358,7 @@ def get_next_sentence_output(bert_config, input_tensor, labels):
         one_hot_labels = tf.one_hot(labels, depth=2, dtype=tf.float32)
         per_example_loss = -tf.reduce_sum(one_hot_labels * log_probs, axis=-1)
         loss = tf.reduce_mean(per_example_loss)
-        return (loss, per_example_loss, log_probs)
+        return loss, per_example_loss, log_probs
 
 
 def gather_indexes(sequence_tensor, positions):
@@ -408,7 +410,8 @@ def input_fn_builder(input_files,
         # For eval, we want no shuffling and parallel reading doesn't matter.
         if is_training:
             d = tf.data.Dataset.from_tensor_slices(tf.constant(input_files))
-            if hvd is not None: d = d.shard(hvd.size(), hvd.rank())
+            if hvd is not None:
+                d = d.shard(hvd.size(), hvd.rank())
             d = d.repeat()
             d = d.shuffle(buffer_size=len(input_files))
 

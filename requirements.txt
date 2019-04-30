@@ -1,3 +1,6 @@
+lxml
 tensorflow >= 1.11.0   # CPU Version of TensorFlow.
 # tensorflow-gpu  >= 1.11.0  # GPU version of TensorFlow.
 numpy >= 1.13.3
+six >= 1.10.0
+horovod >= 0.16.0

@@ -9,14 +9,13 @@ examples = []
 
 
 def grouper(iterable, n, fillvalue=None):
-    "Collect data into fixed-length chunks or blocks"
+    """Collect data into fixed-length chunks or blocks"""
     # grouper('ABCDEFG', 3, 'x') --> ABC DEF Gxx"
     args = [iter(iterable)] * n
     return itertools.zip_longest(*args, fillvalue=fillvalue)
 
 
 def parse_predicted_answers(logits_file):
-    paired_logits = []
     with open(logits_file, 'r') as logits:
         lines = [float(line.split()[1]) for line in logits.readlines()]
     paired_logits = grouper(lines, 2)
@@ -52,7 +51,7 @@ def evaluate(predictions, labels):
     batch_fn = np.count_nonzero((predictions - 1))
 
     # Batch-level binary classification metrics
-    batch_accuracy = (batch_tp + batch_tn) / (batch_n)
+    batch_accuracy = (batch_tp + batch_tn) / batch_n
     batch_precision = batch_tp / (batch_tp + batch_fp)
     batch_recall = batch_tp / (batch_tp + batch_fn)
     batch_specificity = batch_tn / (batch_tn + batch_fp)
@@ -84,4 +83,4 @@ def main(gold_file, logits_file):
 
 
 if __name__ == '__main__':
-    main(*sys.argv[1:])
+    main(sys.argv[1], sys.argv[2])

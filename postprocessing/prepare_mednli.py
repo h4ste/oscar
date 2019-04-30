@@ -30,5 +30,3 @@ def main(test_file, logits_file):
 
 if __name__ == '__main__':
     main(sys.argv[1], sys.argv[2])
-
-
