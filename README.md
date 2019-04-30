@@ -1,5 +1,7 @@
 # Multi-GPU Ready BERT
 
+[![Codacy Badge](https://api.codacy.com/project/badge/Grade/4df57b0d996344cc94ca0d3e78c93211)](https://app.codacy.com/app/h4ste/oscar?utm_source=github.com&utm_medium=referral&utm_content=h4ste/oscar&utm_campaign=Badge_Grade_Settings)
+
 This is a fork of the original (Google's) BERT implementation. 
 
 * Add Multi-GPU support with Horovod
